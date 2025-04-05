@@ -1,6 +1,7 @@
 // note that the i2c_host file uses sercom2, 4MHz, smart mode is enabled and is set to response ACK
 // master baud rate: 0xE8
 // enabled interrupts: ERROR, SB, MB but not the NVIC interrupt lines
+// marie comment: editing this to have uart banner (april 5, 2025)
 
 #include <xc.h>
 #include <stdint.h>
@@ -10,7 +11,34 @@
 #include <string.h>
 #include <math.h>
 #include "platform.h"
-//#include "i2c_host.c"
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+static const char banner_msg[]=
+"\033[0m\033[2J\033[1;1H"
+"+--------------------------------------------------------------------+\r\n"
+"| EEE 192: CanSat                                                    |\r\n"
+"|          Academic Year 2024-2025, Semester 1                       |\r\n"
+"|                                                                    |\r\n"
+"| BME280 Sensor Data Display                                         |\r\n"
+"|                                                                    |\r\n"
+"| Authors: Quitoriano, Nebres, Medina                                |\r\n"
+"| Date:    5 Apr 2025                                                |\r\n"
+"+--------------------------------------------------------------------+\r\n"
+"\r\n"
+"Sensor Status: Initializing...";
+
+static const char ESC_SEQ_SENSOR_STATUS[] = "\033[11;15H\033[0K";
+static const char ESC_SEQ_TEMPERATURE[]   = "\033[14;1H\033[0K Temperature: ";
+static const char ESC_SEQ_ALTITUDE[]      = "\033[15;1H\033[0K Altitude:    ";
+static const char ESC_SEQ_PRESSURE[]      = "\033[16;1H\033[0K Pressure:    ";
+static const char ESC_SEQ_HUMIDITY[]      = "\033[17;1H\033[0K Humidity:    ";
+
+volatile char status_msg[50] = "Initializing...";
+volatile char temp_data[30];
+volatile char alt_data[30];
+volatile char press_data[30];
+volatile char humid_data[30];
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 // https://www.bosch-sensortec.com/media/boschsensortec/downloads/datasheets/bst-bme280-ds002.pdf (data sheet)
 // https://community.bosch-sensortec.com/mems-sensors-forum-jrmujtaw/post/bme280-returns-reset-values-T3qlqm036zdor2R
@@ -27,15 +55,15 @@
 #define BME280_REG_CTRL_HUMIDITY 0xF2  //regsiter controls the humidty measurement (also oversampling)
                                        //Bits [2:0] control oversampling:
                                        //000: Humidity measurement skipped
-                                       //001: 1× oversampling (default)
-                                       //010: 2× oversampling
-                                       //011: 4× oversampling
-                                       //100: 8× oversampling
-                                       //101: 16× oversampling NOTE: Higher oversampling is more accurate, but uses more power
+                                       //001: 1Ã— oversampling (default)
+                                       //010: 2Ã— oversampling
+                                       //011: 4Ã— oversampling
+                                       //100: 8Ã— oversampling
+                                       //101: 16Ã— oversampling NOTE: Higher oversampling is more accurate, but uses more power
 #define BME280_REG_CTRL_MEAS     0xF4  //temperature and pressure measurement (oversampling and power mode)
                                        //use 0x27 (00100111 binary), which means:
-                                       //Temperature: 1× oversampling
-                                       //Pressure: 1× oversampling
+                                       //Temperature: 1Ã— oversampling
+                                       //Pressure: 1Ã— oversampling
                                        //Mode: Normal mode
 #define BME280_REG_CONFIG        0xF5  //configures stand-by time, filter settings, and enabling or disabling the SPI (we don't need because I2C!)
                                        //Bits [7:5]: Standby time in normal mode:
@@ -44,8 +72,8 @@
                                        //010: 125ms and so on
                                        //Bits [4:2]: Filter coefficient:
                                        //000: Filter off
-                                       //001: 2× filter
-                                       //010: 4× filter and so on
+                                       //001: 2Ã— filter
+                                       //010: 4Ã— filter and so on
                                        //Bit [0]: SPI interface mode (not relevant for I2C)
 #define BME280_REG_DATA          0xF7  //MSB of pressure measurement data (full pressure valve requires additional reading bytes)
                                        //Pressure uses F7 to F9 (3-bytes, 20 bits)
@@ -71,6 +99,12 @@ typedef struct {
 
 static BME280_CalibData cal_data; //storing the parameters of the calibration to the BME280 Sensor
 static int32_t t_fine; //placeholder for the temperature value computation
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+// state machine:
+typedef struct prog_state_type{
+//flags for the program
+}
 
 //function prototypes
 uint8_t BME280_INIT(void);
