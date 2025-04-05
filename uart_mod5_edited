@@ -1,0 +1,364 @@
+/*
+ * This file contains no code, just comments.
+ * 
+ * You are expected to replace the contents of this file with your solution,
+ * starting with the sample code. This exercise is NOT meant to be done fully
+ * from scratch.
+ * 
+ * - EEE 158 Handlers
+ */
+
+/**
+ * @file main.c
+ * @brief Module 5 Sample: "Keystroke Hexdump"
+ *
+ * @author Alberto de Villa <alberto.de.villa@eee.upd.edu.ph>
+ * @date 28 Oct 2024
+ */
+
+// Common include for the XC32 compiler
+#include <xc.h>
+#include <string.h>
+#include <stdio.h>
+#include <stdbool.h>
+
+#include "platform.h"
+
+/////////////////////////////////////////////////////////////////////////////
+
+/*
+ * Copyright message printed upon reset
+ * 
+ * Displaying author information is optional; but as always, must be present
+ * as comments at the top of the source file for copyright purposes.
+ * 
+ * FIXME: Modify this prompt message to account for additional instructions.
+ */
+static const char banner_msg[] =
+"\033[0m\033[2J\033[1;1H"
+"+--------------------------------------------------------------------+\r\n"
+"| EEE 158: Electrical and Electronics Engineering Laboratory V       |\r\n"
+"|          Academic Year 2024-2025, Semester 1                       |\r\n"
+"|                                                                    |\r\n"
+"| Solution: \"Graded Exercise\"                                        |\r\n"
+"|                                                                    |\r\n"
+"| Author:  EEE 158 Handlers (Almario, de Villa, Nierva, Sison, Tuso) |\r\n"
+"| Date:    21 Oct 2024                                               |\r\n"
+"+--------------------------------------------------------------------+\r\n"
+"\r\n" 
+"On-board button:\r\n"
+"Blink Setting:";
+
+static const char ESC_SEQ_KEYP_LINE[] = "\033[11;18H\033[0K";
+static const char ESC_SEQ_IDLE_INF[]  = "\033[12;1H\033[0K";
+static const char ESC_SEQ_LED_STATE_LINE[] = "\033[12;16H\033[0K";
+
+volatile char led_mode_str[15] = "[ OFF    ]";
+volatile char stat_buf [35];
+ 
+//////////////////////////////////////////////////////////////////////////////
+
+// Program state machine
+typedef struct prog_state_type
+{
+	// Flags for this program
+#define PROG_FLAG_BANNER_PENDING	0x0001	// Waiting to transmit the banner
+#define PROG_FLAG_UPDATE_PENDING	0x0002	// Waiting to transmit updates
+#define PROG_FLAG_PB_PRESSED        0x0004  // Flag for button is pressed
+#define PROG_FLAG_RESET_PENDING     0x0008  // reset is pending
+#define PROG_FLAG_RESET_COMPLETE    0x0010  // reset is complete
+#define PROG_FLAG_GEN_COMPLETE		0x8000	// Message generation has been done, but transmission has not occurred
+
+#define PROG_FLAG_LED_MODE_0        0x0001  // Flag for each LED mode
+#define PROG_FLAG_LED_MODE_1        0x0002
+#define PROG_FLAG_LED_MODE_2        0x0004
+#define PROG_FLAG_LED_MODE_3        0x0008
+#define PROG_FLAG_LED_MODE_4        0x0010
+#define PROG_FLAG_LED_CHANGED       0x0020  // Flag for if the LED state is changed
+    
+	uint16_t flags;
+    
+    uint16_t led_mode;
+	
+	// Transmit stuff
+	platform_usart_tx_bufdesc_t tx_desc[4];
+	char tx_buf[64];
+	uint16_t tx_blen;
+	
+	// Receiver stuff
+	platform_usart_rx_async_desc_t rx_desc;
+	uint16_t rx_desc_blen;
+	char rx_desc_buf[16];
+} prog_state_t;
+
+/*
+ * Initialize the main program state
+ * 
+ * This style might be familiar to those accustomed to he programming
+ * conventions employed by the Arduino platform.
+ */
+static void prog_setup(prog_state_t *ps)
+{
+	memset(ps, 0, sizeof(*ps));
+	
+	platform_init();
+	
+	ps->rx_desc.buf     = ps->rx_desc_buf;
+	ps->rx_desc.max_len = sizeof(ps->rx_desc_buf);
+    
+    ps->flags |= PROG_FLAG_BANNER_PENDING;
+    ps->flags |= PROG_FLAG_UPDATE_PENDING;
+    ps->flags |= PROG_FLAG_LED_CHANGED;
+    ps->led_mode |= PROG_FLAG_LED_MODE_0;
+	
+	platform_usart_cdc_rx_async(&ps->rx_desc);
+	return;
+}
+
+/*
+ * Do a single loop of the main program
+ * 
+ * This style might be familiar to those accustomed to he programming
+ * conventions employed by the Arduino platform.
+ */
+static void prog_loop_one(prog_state_t *ps)
+{
+	uint16_t a = 0, b = 0, c = 0;
+	
+	// Do one iteration of the platform event loop first.
+	platform_do_loop_one();
+	
+	
+    /* IGGY COMMENT
+     *  The program seems to be coded around a "flag" based programming 
+     *  paradigm (i.e., set flags, then process)
+     * 
+     * `platform_pb_get_event()` returns
+     *  debounced PB state from EIC
+     */
+    
+    // Something happened to the pushbutton?    
+	if ((a = platform_pb_get_event()) != 0) {
+        ps->flags |= PROG_FLAG_UPDATE_PENDING;
+        
+        if ((a & PLATFORM_PB_ONBOARD_PRESS) != 0) {
+			// Print out the banner
+			ps->flags |= PROG_FLAG_PB_PRESSED;
+		} else {
+            ps->flags &= ~PROG_FLAG_PB_PRESSED;
+        }
+        
+		a = 0;
+	}
+
+	// Something received from the UART?
+	if (ps->rx_desc.compl_type == PLATFORM_USART_RX_COMPL_DATA) {
+		/*
+		 * There's something.
+		 * 
+		 * The completion-info payload contains the number of bytes
+		 * read into the receive buffer.
+		 */ 
+		ps->flags |= PROG_FLAG_UPDATE_PENDING;
+		ps->rx_desc_blen = ps->rx_desc.compl_info.data_len;
+	}
+    
+    // CTRL + E / HOME pressed?
+    if (ps->flags & PROG_FLAG_RESET_PENDING) {
+        
+        ps->flags |= PROG_FLAG_BANNER_PENDING;
+        ps->flags |= PROG_FLAG_UPDATE_PENDING;
+        
+        ps->rx_desc_blen = ps->rx_desc.compl_info.data_len;
+        ps->flags &= ~PROG_FLAG_RESET_COMPLETE;
+        ps->flags &= ~PROG_FLAG_RESET_PENDING;
+    }
+	
+	////////////////////////////////////////////////////////////////////
+	
+	// Process any pending flags (BANNER)
+	do {
+        /*
+         * If flag doesn't need to be rendered, it won't
+         */
+		if ((ps->flags & PROG_FLAG_BANNER_PENDING) == 0)
+			break;
+		
+		if (platform_usart_cdc_tx_busy())
+			break;
+		
+		if ((ps->flags & PROG_FLAG_GEN_COMPLETE) == 0) {
+			// Message has not been generated.
+			ps->tx_desc[0].buf = banner_msg;
+			ps->tx_desc[0].len = sizeof(banner_msg)-1;
+            
+			ps->flags |= PROG_FLAG_GEN_COMPLETE;
+		}
+        
+		if (platform_usart_cdc_tx_async(&ps->tx_desc[0], 1)) {
+			ps->flags &= ~(PROG_FLAG_BANNER_PENDING | PROG_FLAG_GEN_COMPLETE);
+		}
+	} while (0);
+	
+	// Process any pending flags (UPDATE)
+	do {
+        
+		if ((ps->flags & PROG_FLAG_UPDATE_PENDING) == 0)
+			break;
+		
+		if (platform_usart_cdc_tx_busy())
+			break;
+        
+        /* IGGY COMMENTS
+         *  GEN_COMPLETE is "generation has been done, transmission not occurred"
+         * 
+         *  ESC_SEQ_KEYP_LINE is \033 [11;39H     \033 [0K
+         *                       ESC  MOVE CURSOR ESC  ERASE FROM CURSOR -> EOL
+         * 
+         *  ESC_SEQ_IDLE_INF  is \033  [12;1H
+         *                       ESC   MOVE CURSOR
+         * 
+         *  From some extrapolation via trial and error,
+         *  the program writes tx_desc[0], then tx_desc[1], and then tx_desc[2].
+         * 
+         *  tx_desc gets written to wherever ESC_SEQ_KEYP_LINE is
+         */
+		if ((ps->flags & PROG_FLAG_GEN_COMPLETE) == 0 || (ps->flags & PROG_FLAG_RESET_COMPLETE) == 0) { 
+			// Message has not been generated.
+            ps->tx_desc[0].buf = ESC_SEQ_KEYP_LINE;
+            ps->tx_desc[0].len = sizeof(ESC_SEQ_KEYP_LINE)-1;
+
+			memset(ps->tx_buf, 0, sizeof(ps->tx_buf));
+            
+            // if PB is pressed
+            if (ps->flags & PROG_FLAG_PB_PRESSED) {
+                // Print out the banner
+                ps->tx_desc[1].buf = "[Pressed]";
+                ps->tx_desc[1].len = 9;
+            } else {
+                ps->tx_desc[1].buf = "[Released]";
+                ps->tx_desc[1].len = 10;
+            }
+
+            // if a character is received
+			if (ps->rx_desc_blen > 0) {                
+                uint16_t recvd_key = (ps->rx_desc_buf[0] & 0x00FF);
+                uint16_t recvd_key_long = recvd_key | (ps->rx_desc_buf[2] & 0x00FF) << 8;
+                
+                // if a, A, left
+                if (recvd_key == 0x61 || recvd_key == 0x41 || recvd_key_long == 0x441B) {
+                    // if led_state isn't at the very left, adjust 
+                    if (ps->led_mode != 1) {
+                       ps->led_mode = ps->led_mode >> 1;
+                       
+                       // indicate that the LED state has changed
+                       ps->flags |= PROG_FLAG_LED_CHANGED;
+                    }
+                } 
+                
+                // if d, D, right
+                if (recvd_key == 0x64 || recvd_key == 0x44 || recvd_key_long == 0x431B) {
+                    // if led_state isn't at the very right, adjust
+                    if (ps->led_mode != (1 << 4)) {
+                       ps->led_mode = ps->led_mode << 1;
+                       
+                       // indicate that the LED state has changed
+                       ps->flags |= PROG_FLAG_LED_CHANGED;
+                    }
+                }  
+                
+                // if ctrl+E, HOME
+                if (recvd_key == 0x05 || recvd_key_long == 0x311B) {
+                    ps->flags |= PROG_FLAG_RESET_PENDING;
+                }
+			} 
+            
+            switch (ps->led_mode) {
+                case PROG_FLAG_LED_MODE_0:
+                    strcpy(led_mode_str, "[ OFF    ]");
+                    break;
+                case PROG_FLAG_LED_MODE_1:
+                    strcpy(led_mode_str, "[ SLOW   ]");
+                    break;
+                case PROG_FLAG_LED_MODE_2:
+                    strcpy(led_mode_str, "[ MEDIUM ]");
+                    break;
+                case PROG_FLAG_LED_MODE_3:
+                    strcpy(led_mode_str, "[ FAST   ]");
+                    break;
+                case PROG_FLAG_LED_MODE_4:   
+                    strcpy(led_mode_str, "[ ON     ]");
+                    break;
+            }
+            
+            // Only set the TCC PER and CC[1] if an LED state change was 
+            // detected
+            if (ps->flags & PROG_FLAG_LED_CHANGED) {
+                switch (ps->led_mode) {
+                    case PROG_FLAG_LED_MODE_0:
+                        platform_blink_modify(11718, 11717);
+                        break;
+                    case PROG_FLAG_LED_MODE_1:
+                        platform_blink_modify(21092, 23436);
+                        break;
+                    case PROG_FLAG_LED_MODE_2:
+                        platform_blink_modify(9373, 11717);
+                        break;
+                    case PROG_FLAG_LED_MODE_3:
+                        platform_blink_modify(3515, 7030);
+                        break;
+                    case PROG_FLAG_LED_MODE_4:   
+                        platform_blink_modify(0, 7030);
+                        break;
+                }
+                
+                ps->flags &= ~PROG_FLAG_LED_CHANGED;
+            }
+            
+            snprintf(stat_buf, 25, "\033[12;16H\033[0K %s", led_mode_str);
+            
+            ps->tx_desc[2].buf = stat_buf;
+            ps->tx_desc[2].len = 25;
+            
+            ps->flags |= PROG_FLAG_GEN_COMPLETE;
+            ps->flags |= PROG_FLAG_RESET_COMPLETE;
+            
+            ps->rx_desc_blen = 0; 
+		}
+		
+		if (platform_usart_cdc_tx_async(&ps->tx_desc[0], 3)) {
+			ps->rx_desc.compl_type = PLATFORM_USART_RX_COMPL_NONE;
+			platform_usart_cdc_rx_async(&ps->rx_desc);
+			ps->flags &= ~(PROG_FLAG_UPDATE_PENDING | PROG_FLAG_GEN_COMPLETE);
+		}
+		
+		
+	} while (0);
+	
+	// Done
+	return;
+}
+
+// main() -- the heart of the program
+int main(void)
+{
+	prog_state_t ps;
+	
+	// Initialization time	
+	prog_setup(&ps);
+	
+	/*
+	 * Microcontroller main()'s are supposed to never return (welp, they
+	 * have none to return to); hence the intentional infinite loop.
+	 */
+	for (;;) {
+		prog_loop_one(&ps);
+	}
+    
+    // This line must never be reached
+    return 1;
+}
+
+do {
+    
+} while(0);
