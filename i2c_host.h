@@ -5,6 +5,7 @@
     Initialization function based off code generated through Microchip Code Configurator. (c) Microchip Inc.
     Read/Write functions written by Allen.
 */
+// marie (april 5, 2025) note: i think this should NOT be a header file. will double check on it!
 
 void SERCOM2_I2C_Clock_Init() {
     // All APB C bus peripheral clocks are enabled by default, so this isn't necessary
