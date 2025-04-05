@@ -13,7 +13,7 @@
 #include "platform.h"
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-static const char banner_msg[]=
+static const char banner_msg[] =
 "\033[0m\033[2J\033[1;1H"
 "+--------------------------------------------------------------------+\r\n"
 "| EEE 192: CanSat                                                    |\r\n"
@@ -25,19 +25,18 @@ static const char banner_msg[]=
 "| Date:    5 Apr 2025                                                |\r\n"
 "+--------------------------------------------------------------------+\r\n"
 "\r\n"
-"Sensor Status: Initializing...";
+"Sensor Status: Initializing...\r\n\r\n"
+"Temperature: \r\n"
+"Altitude:    \r\n"
+"Pressure:    \r\n"
+"Humidity:    \r\n";
 
-static const char ESC_SEQ_SENSOR_STATUS[] = "\033[11;15H\033[0K";
-static const char ESC_SEQ_TEMPERATURE[]   = "\033[14;1H\033[0K Temperature: ";
-static const char ESC_SEQ_ALTITUDE[]      = "\033[15;1H\033[0K Altitude:    ";
-static const char ESC_SEQ_PRESSURE[]      = "\033[16;1H\033[0K Pressure:    ";
-static const char ESC_SEQ_HUMIDITY[]      = "\033[17;1H\033[0K Humidity:    ";
-
-volatile char status_msg[50] = "Initializing...";
-volatile char temp_data[30];
-volatile char alt_data[30];
-volatile char press_data[30];
-volatile char humid_data[30];
+// Display position escape sequences
+static const char ESC_SEQ_STATUS[]      = "\033[11;15H\033[0K";
+static const char ESC_SEQ_TEMPERATURE[] = "\033[13;13H\033[0K";
+static const char ESC_SEQ_ALTITUDE[]    = "\033[14;13H\033[0K";
+static const char ESC_SEQ_PRESSURE[]    = "\033[15;13H\033[0K";
+static const char ESC_SEQ_HUMIDITY[]    = "\033[16;13H\033[0K";
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 // https://www.bosch-sensortec.com/media/boschsensortec/downloads/datasheets/bst-bme280-ds002.pdf (data sheet)
@@ -104,7 +103,29 @@ static int32_t t_fine; //placeholder for the temperature value computation
 // state machine:
 typedef struct prog_state_type{
 //flags for the program
-}
+// Flags for this program
+#define PROG_FLAG_BANNER_PENDING	0x0001  // Waiting to transmit the banner
+#define PROG_FLAG_UPDATE_PENDING	0x0002  // Waiting to transmit updates
+#define PROG_FLAG_GEN_COMPLETE		0x8000  // Message generation has been done
+#define PROG_FLAG_SENSOR_UPDATE     0x0020  // Sensor data update is pending
+    
+	uint16_t flags;
+	
+	// Transmit stuff
+	platform_usart_tx_bufdesc_t tx_desc[5]; // One for banner, 4 for sensor values
+	char status_buf[30];
+	char temp_buf[20];
+	char alt_buf[20];
+	char pres_buf[20];
+	char hum_buf[20];
+    
+    // Sensor data
+    float temperature;
+    float pressure;
+    float humidity;
+    float altitude;
+    uint32_t sensor_timer;
+} prog_state_t;
 
 //function prototypes
 uint8_t BME280_INIT(void);
@@ -325,53 +346,150 @@ float BME280_ALT(float pressure) {
     return 44330.0f * (1.0f - pow(pressure / 10.0f / P0, 0.19029495f));
 }
 
-void UART_PRINTF(const char *format, ...) {
-    char buffer[256];
-    va_list args;
-    va_start(args, format);
-    vsprintf(buffer, format, args);
-    va_end(args);
+/*
+ * Initialize the main program state
+ */
+static void prog_setup(prog_state_t *ps)
+{
+	memset(ps, 0, sizeof(*ps));
+	
+	platform_init();
     
-    platform_usart_tx_bufdesc_t desc;
-    desc.buf = buffer; 
-    desc.len = strlen(buffer);
+    ps->flags |= PROG_FLAG_BANNER_PENDING;
+    ps->flags |= PROG_FLAG_UPDATE_PENDING;
     
-    platform_usart_cdc_tx_async(&desc, 1);
+    ps->sensor_timer = 0;
     
-    while(platform_usart_cdc_tx_busy()){
-        // do nothing
+    // Initialize BME280 sensor
+    if (!BME280_INIT()) {
+        // Error initializing sensor
+        strcpy(ps->status_buf, "BME280 initialization failed!");
+    } else {
+        strcpy(ps->status_buf, "BME280 sensor ready");
+        ps->flags |= PROG_FLAG_SENSOR_UPDATE;
     }
+    
+	return;
 }
 
-void data_vis_send (float temperature, float pressure, float humidity, float altitude){
-    UART_PRINTF("DV_data,%.2f,%.2f,%.2f,%.2f\r\n", temperature, pressure, humidity, altitude);
+/*
+ * Do a single loop of the main program
+ */
+static void prog_loop_one(prog_state_t *ps)
+{	
+	// Do one iteration of the platform event loop first.
+	platform_do_loop_one();
+    
+    // Check if it's time to update sensor readings (approximately every second)
+    ps->sensor_timer++;
+    if (ps->sensor_timer >= 500000) {
+        ps->sensor_timer = 0;
+        
+        // Read sensor data
+        BME280_READ_ALL(&ps->temperature, &ps->pressure, &ps->humidity);
+        ps->altitude = BME280_ALT(ps->pressure);
+        
+        // Format sensor data strings
+        snprintf(ps->temp_buf, sizeof(ps->temp_buf), "%.2f C", ps->temperature);
+        snprintf(ps->alt_buf, sizeof(ps->alt_buf), "%.2f m", ps->altitude);
+        snprintf(ps->pres_buf, sizeof(ps->pres_buf), "%.2f hPa", ps->pressure);
+        snprintf(ps->hum_buf, sizeof(ps->hum_buf), "%.2f %%", ps->humidity);
+        
+        strcpy(ps->status_buf, "Data updated");
+        
+        ps->flags |= PROG_FLAG_SENSOR_UPDATE;
+        ps->flags |= PROG_FLAG_UPDATE_PENDING;
+    }
+	
+	////////////////////////////////////////////////////////////////////
+	
+	// Process any pending flags (BANNER)
+	do {
+		if ((ps->flags & PROG_FLAG_BANNER_PENDING) == 0)
+			break;
+		
+		if (platform_usart_cdc_tx_busy())
+			break;
+		
+		if ((ps->flags & PROG_FLAG_GEN_COMPLETE) == 0) {
+			ps->tx_desc[0].buf = banner_msg;
+			ps->tx_desc[0].len = sizeof(banner_msg)-1;
+            
+			ps->flags |= PROG_FLAG_GEN_COMPLETE;
+		}
+        
+		if (platform_usart_cdc_tx_async(&ps->tx_desc[0], 1)) {
+			ps->flags &= ~(PROG_FLAG_BANNER_PENDING | PROG_FLAG_GEN_COMPLETE);
+		}
+	} while (0);
+	
+	// Process any pending flags (UPDATE SENSOR DATA)
+	do {
+		if ((ps->flags & PROG_FLAG_UPDATE_PENDING) == 0)
+			break;
+		
+		if (platform_usart_cdc_tx_busy())
+			break;
+        
+		if ((ps->flags & PROG_FLAG_GEN_COMPLETE) == 0) {
+			// Setup status message
+            ps->tx_desc[0].buf = ESC_SEQ_STATUS;
+            ps->tx_desc[0].len = sizeof(ESC_SEQ_STATUS)-1;
+            ps->tx_desc[1].buf = ps->status_buf;
+            ps->tx_desc[1].len = strlen(ps->status_buf);
+            
+            // Setup temperature value
+            ps->tx_desc[2].buf = ESC_SEQ_TEMPERATURE;
+            ps->tx_desc[2].len = sizeof(ESC_SEQ_TEMPERATURE)-1;
+            ps->tx_desc[3].buf = ps->temp_buf;
+            ps->tx_desc[3].len = strlen(ps->temp_buf);
+            
+            // Setup altitude value
+            ps->tx_desc[4].buf = ESC_SEQ_ALTITUDE;
+            ps->tx_desc[4].len = sizeof(ESC_SEQ_ALTITUDE)-1;
+            ps->tx_desc[5].buf = ps->alt_buf;
+            ps->tx_desc[5].len = strlen(ps->alt_buf);
+            
+            // Setup pressure value
+            ps->tx_desc[6].buf = ESC_SEQ_PRESSURE;
+            ps->tx_desc[6].len = sizeof(ESC_SEQ_PRESSURE)-1;
+            ps->tx_desc[7].buf = ps->pres_buf;
+            ps->tx_desc[7].len = strlen(ps->pres_buf);
+            
+            // Setup humidity value
+            ps->tx_desc[8].buf = ESC_SEQ_HUMIDITY;
+            ps->tx_desc[8].len = sizeof(ESC_SEQ_HUMIDITY)-1;
+            ps->tx_desc[9].buf = ps->hum_buf;
+            ps->tx_desc[9].len = strlen(ps->hum_buf);
+            
+            ps->flags |= PROG_FLAG_GEN_COMPLETE;
+		}
+		
+		if (platform_usart_cdc_tx_async(&ps->tx_desc[0], 10)) {
+			ps->flags &= ~(PROG_FLAG_UPDATE_PENDING | PROG_FLAG_GEN_COMPLETE);
+		}
+	} while (0);
+	
+	// Done
+	return;
 }
 
-int main(void){
-    platform_usart_init();
-    if(!BME280_INIT()){ //initialize sensor
-        UART_PRINTF("Failed to initialize BME280 sensor \r\n");
-        while(1);
-    }
-    UART_PRINTF("BME280 initialized successfully \r\n");
+// main() -- the heart of the program
+int main(void)
+{
+	prog_state_t ps;
+	
+	// Initialization time	
+	prog_setup(&ps);
+	
+	/*
+	 * Microcontroller main()'s are supposed to never return (welp, they
+	 * have none to return to); hence the intentional infinite loop.
+	 */
+	for (;;) {
+		prog_loop_one(&ps);
+	}
     
-    float temperature, pressure, humidity, altitude;
-    while(1){
-        BME280_READ_ALL(&temperature, &pressure, &humidity);
-        altitude = BME280_ALT(pressure);
-        
-        UART_PRINTF("Temperature: %.2f C\r\n", temperature);
-        UART_PRINTF("Pressure: %.2f hPa\r\n", pressure);
-        UART_PRINTF("Humidity: %.2f %%\r\n", humidity);
-        UART_PRINTF("Altitude: %.2f m\r\n", altitude);
-        UART_PRINTF("------------------------\r\n");
-        
-        data_vis_send(temperature, pressure, humidity, altitude);
-        
-        // Delay between readings (simple delay loop)
-        for(uint32_t i = 0; i < 1000000; i++) {
-            asm("nop");
-        }
-    }
+    // This line must never be reached
     return 0;
 }
