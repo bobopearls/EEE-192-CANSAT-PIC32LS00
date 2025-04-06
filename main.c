@@ -1,44 +1,58 @@
-// note that the i2c_host file uses sercom2, 4MHz, smart mode is enabled and is set to response ACK
-// master baud rate: 0xE8
-// enabled interrupts: ERROR, SB, MB but not the NVIC interrupt lines
-// marie comment: editing this to have uart banner (april 5, 2025)
+/**
+ * @file main.c
+ * @brief Module 5 Sample: "Keystroke Hexdump"
+ *
+ * @author Alberto de Villa <alberto.de.villa@eee.upd.edu.ph>
+ * @date 28 Oct 2024
+ */
 
+// Common include for the XC32 compiler
 #include <xc.h>
-#include <stdint.h>
+#include <string.h>
 #include <stdio.h>
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <stdarg.h>
-#include <string.h>
 #include <math.h>
-#include "platform.h"
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+#include "platform.h"
+
+/////////////////////////////////////////////////////////////////////////////
+
+/*
+ * Copyright message printed upon reset
+ * 
+ * Displaying author information is optional; but as always, must be present
+ * as comments at the top of the source file for copyright purposes.
+ * 
+ * FIXME: Modify this prompt message to account for additional instructions.
+ */
 static const char banner_msg[] =
 "\033[0m\033[2J\033[1;1H"
 "+--------------------------------------------------------------------+\r\n"
 "| EEE 192: CanSat                                                    |\r\n"
-"|          Academic Year 2024-2025, Semester 1                       |\r\n"
+"|          Academic Year 2024-2025, Semester 2                       |\r\n"
 "|                                                                    |\r\n"
-"| BME280 Sensor Data Display                                         |\r\n"
+"| BME280 Sensor Data Out Test 1                                      |\r\n"
 "|                                                                    |\r\n"
-"| Authors: Quitoriano, Nebres, Medina                                |\r\n"
-"| Date:    5 Apr 2025                                                |\r\n"
+"| Author:  Quitoriano, Nebres, Medina                                |\r\n"
+"| Date:    05 Apr 2025                                               |\r\n"
 "+--------------------------------------------------------------------+\r\n"
 "\r\n"
-"Sensor Status: Initializing...\r\n\r\n"
+"Sensor Status: Initializing... \r\n\r\n"
 "Temperature: \r\n"
 "Altitude:    \r\n"
 "Pressure:    \r\n"
 "Humidity:    \r\n";
 
-// Display position escape sequences
 static const char ESC_SEQ_STATUS[]      = "\033[11;15H\033[0K";
 static const char ESC_SEQ_TEMPERATURE[] = "\033[13;13H\033[0K";
 static const char ESC_SEQ_ALTITUDE[]    = "\033[14;13H\033[0K";
 static const char ESC_SEQ_PRESSURE[]    = "\033[15;13H\033[0K";
 static const char ESC_SEQ_HUMIDITY[]    = "\033[16;13H\033[0K";
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+////////////////////////////////////////////////////////////////////////////////
 // https://www.bosch-sensortec.com/media/boschsensortec/downloads/datasheets/bst-bme280-ds002.pdf (data sheet)
 // https://community.bosch-sensortec.com/mems-sensors-forum-jrmujtaw/post/bme280-returns-reset-values-T3qlqm036zdor2R
 // from chatgpt https://learn.sparkfun.com/tutorials/qwiic-atmospheric-sensor-bme280-hookup-guide/all?utm_source=chatgpt.com
@@ -54,15 +68,15 @@ static const char ESC_SEQ_HUMIDITY[]    = "\033[16;13H\033[0K";
 #define BME280_REG_CTRL_HUMIDITY 0xF2  //regsiter controls the humidty measurement (also oversampling)
                                        //Bits [2:0] control oversampling:
                                        //000: Humidity measurement skipped
-                                       //001: 1× oversampling (default)
-                                       //010: 2× oversampling
-                                       //011: 4× oversampling
-                                       //100: 8× oversampling
-                                       //101: 16× oversampling NOTE: Higher oversampling is more accurate, but uses more power
+                                       //001: 1◊ oversampling (default)
+                                       //010: 2◊ oversampling
+                                       //011: 4◊ oversampling
+                                       //100: 8◊ oversampling
+                                       //101: 16◊ oversampling NOTE: Higher oversampling is more accurate, but uses more power
 #define BME280_REG_CTRL_MEAS     0xF4  //temperature and pressure measurement (oversampling and power mode)
                                        //use 0x27 (00100111 binary), which means:
-                                       //Temperature: 1× oversampling
-                                       //Pressure: 1× oversampling
+                                       //Temperature: 1◊ oversampling
+                                       //Pressure: 1◊ oversampling
                                        //Mode: Normal mode
 #define BME280_REG_CONFIG        0xF5  //configures stand-by time, filter settings, and enabling or disabling the SPI (we don't need because I2C!)
                                        //Bits [7:5]: Standby time in normal mode:
@@ -71,8 +85,8 @@ static const char ESC_SEQ_HUMIDITY[]    = "\033[16;13H\033[0K";
                                        //010: 125ms and so on
                                        //Bits [4:2]: Filter coefficient:
                                        //000: Filter off
-                                       //001: 2× filter
-                                       //010: 4× filter and so on
+                                       //001: 2◊ filter
+                                       //010: 4◊ filter and so on
                                        //Bit [0]: SPI interface mode (not relevant for I2C)
 #define BME280_REG_DATA          0xF7  //MSB of pressure measurement data (full pressure valve requires additional reading bytes)
                                        //Pressure uses F7 to F9 (3-bytes, 20 bits)
@@ -98,35 +112,47 @@ typedef struct {
 
 static BME280_CalibData cal_data; //storing the parameters of the calibration to the BME280 Sensor
 static int32_t t_fine; //placeholder for the temperature value computation
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-// state machine:
-typedef struct prog_state_type{
-//flags for the program
-// Flags for this program
-#define PROG_FLAG_BANNER_PENDING	0x0001  // Waiting to transmit the banner
-#define PROG_FLAG_UPDATE_PENDING	0x0002  // Waiting to transmit updates
-#define PROG_FLAG_GEN_COMPLETE		0x8000  // Message generation has been done
-#define PROG_FLAG_SENSOR_UPDATE     0x0020  // Sensor data update is pending
+////////////////////////////////////////////////////////////////////////////////
+// Program state machine
+typedef struct prog_state_type
+{
+	// Flags for this program
+    // dont change flags from sample because they are in platform.h already
+    // add other flags by assigning different registers which correlate to different states
+#define PROG_FLAG_BANNER_PENDING	0x0001	// Waiting to transmit the banner
+#define PROG_FLAG_UPDATE_PENDING	0x0002	// Waiting to transmit updates
+//#define PROG_FLAG_BUTTON_PRESSED    0x0004 
+#define PROG_FLAG_RESET_PENDING     0x0008 
+#define PROG_FLAG_RESET_COMPLETE    0x0010 
+#define PROG_FLAG_GEN_COMPLETE		0x8000	// Message generation has been done, but transmission has not occurred
+#define PROG_FLAG_SENSOR_UPDATE     0x0020
     
 	uint16_t flags;
+    //uint16_t led_state;
 	
-	// Transmit stuff
-	platform_usart_tx_bufdesc_t tx_desc[5]; // One for banner, 4 for sensor values
-	char status_buf[30];
-	char temp_buf[20];
-	char alt_buf[20];
-	char pres_buf[20];
-	char hum_buf[20];
+	// Transmit stuff, Tx
+	platform_usart_tx_bufdesc_t tx_desc[5]; // one for the banner, 4 more for the snesor values
+	char tx_buf[64];
+    uint16_t tx_blen;
     
-    // Sensor data
+    char status_buf[30];
+    char temp_buf[20];
+    char alt_buf[20];
+    char pres_buf[20];
+    char hum_buf[20];
+	
+	// Receiver stuff, Rx [WE WILL USE THIS LATER IF WE NEED USER INPUTS]
+	platform_usart_rx_async_desc_t rx_desc;
+	uint16_t rx_desc_blen;
+	char rx_desc_buf[16];
+    
+    // Sensor Data
     float temperature;
     float pressure;
     float humidity;
     float altitude;
     uint32_t sensor_timer;
 } prog_state_t;
-
 //function prototypes
 uint8_t BME280_INIT(void);
 void BME280_READ_ALL(float *temp, float *pres, float *hum); //we want to be able to modify the temp, pressure, and humidity by updating the float values
@@ -348,44 +374,60 @@ float BME280_ALT(float pressure) {
 
 /*
  * Initialize the main program state
+ * 
+ * This style might be familiar to those accustomed to he programming
+ * conventions employed by the Arduino platform.
  */
 static void prog_setup(prog_state_t *ps)
 {
 	memset(ps, 0, sizeof(*ps));
 	
 	platform_init();
+	
+	ps->rx_desc.buf     = ps->rx_desc_buf;
+	ps->rx_desc.max_len = sizeof(ps->rx_desc_buf);
     
+    //display the banner with information
     ps->flags |= PROG_FLAG_BANNER_PENDING;
     ps->flags |= PROG_FLAG_UPDATE_PENDING;
     
-    ps->sensor_timer = 0;
+    //display the state of the button
+    //ps->flags |= PROG_FLAG_BUTTON_PRESSED;
     
-    // Initialize BME280 sensor
-    if (!BME280_INIT()) {
-        // Error initializing sensor
-        strcpy(ps->status_buf, "BME280 initialization failed!");
-    } else {
-        strcpy(ps->status_buf, "BME280 sensor ready");
+    //display the (initial) state of the led
+    //ps->flags |= PROG_FLAG_LED_CHANGE;
+    //ps->led_state |= PROG_FLAG_LED_OFF;
+    
+    // initialize the bme280 sensor
+    if(!BME280_INIT()){
+        //then its not the bme280 (will change to other sensors when it is there)
+        strcpy(ps->status_buf, "BME280 INIT FAILED");
+    }
+    else{
+        strcpy(ps->status_buf, "BME280 FOUND, READY");
         ps->flags |= PROG_FLAG_SENSOR_UPDATE;
     }
-    
+	
+	//platform_usart_cdc_rx_async(&ps->rx_desc); //ASYNC USART RX
 	return;
 }
 
 /*
  * Do a single loop of the main program
+ * 
+ * This style might be familiar to those accustomed to he programming
+ * conventions employed by the Arduino platform.
  */
-static void prog_loop_one(prog_state_t *ps)
-{	
+static void prog_loop_one(prog_state_t *ps) {
+    //uint16_t a = 0, b = 0, c = 0;
+	
 	// Do one iteration of the platform event loop first.
 	platform_do_loop_one();
-    
-    // Check if it's time to update sensor readings (approximately every second)
-    ps->sensor_timer++;
-    if (ps->sensor_timer >= 500000) {
+	ps-> sensor_timer++; // check if we should update sensor reading(every 1 second)
+	if(ps->sensor_timer >= 500000){
         ps->sensor_timer = 0;
         
-        // Read sensor data
+        // then read the sensor data
         BME280_READ_ALL(&ps->temperature, &ps->pressure, &ps->humidity);
         ps->altitude = BME280_ALT(ps->pressure);
         
@@ -401,6 +443,28 @@ static void prog_loop_one(prog_state_t *ps)
         ps->flags |= PROG_FLAG_UPDATE_PENDING;
     }
 	
+	// Something from the UART?
+	if (ps->rx_desc.compl_type == PLATFORM_USART_RX_COMPL_DATA) {
+		/*
+		 * There's something.
+		 * 
+		 * The completion-info payload contains the number of bytes
+		 * read into the receive buffer.
+		 */ 
+		ps->flags |= PROG_FLAG_UPDATE_PENDING;
+		ps->rx_desc_blen = ps->rx_desc.compl_info.data_len;
+	}
+    
+    // clearing the screen when ctrl+e is pressed
+    if(ps->flags & PROG_FLAG_RESET_PENDING){
+        //display the banner with information
+        ps->flags |= PROG_FLAG_BANNER_PENDING;
+        ps->flags |= PROG_FLAG_UPDATE_PENDING;
+        ps->rx_desc_blen = ps->rx_desc.compl_info.data_len; //compile info? from previous
+        ps->flags &= ~PROG_FLAG_RESET_COMPLETE; // ensure a complete
+        ps->flags &= ~PROG_FLAG_RESET_PENDING; // before waiting for the next thing
+    }
+	
 	////////////////////////////////////////////////////////////////////
 	
 	// Process any pending flags (BANNER)
@@ -412,12 +476,12 @@ static void prog_loop_one(prog_state_t *ps)
 			break;
 		
 		if ((ps->flags & PROG_FLAG_GEN_COMPLETE) == 0) {
+			// Message has not been generated.
 			ps->tx_desc[0].buf = banner_msg;
 			ps->tx_desc[0].len = sizeof(banner_msg)-1;
-            
 			ps->flags |= PROG_FLAG_GEN_COMPLETE;
 		}
-        
+		
 		if (platform_usart_cdc_tx_async(&ps->tx_desc[0], 1)) {
 			ps->flags &= ~(PROG_FLAG_BANNER_PENDING | PROG_FLAG_GEN_COMPLETE);
 		}
@@ -430,21 +494,22 @@ static void prog_loop_one(prog_state_t *ps)
 		
 		if (platform_usart_cdc_tx_busy())
 			break;
-        
+		
 		if ((ps->flags & PROG_FLAG_GEN_COMPLETE) == 0) {
-			// Setup status message
-            ps->tx_desc[0].buf = ESC_SEQ_STATUS;
-            ps->tx_desc[0].len = sizeof(ESC_SEQ_STATUS)-1;
+			// Setting up the status message
+			ps->tx_desc[0].buf = ESC_SEQ_STATUS;
+			ps->tx_desc[0].len = sizeof(ESC_SEQ_STATUS)-1;
             ps->tx_desc[1].buf = ps->status_buf;
             ps->tx_desc[1].len = strlen(ps->status_buf);
             
-            // Setup temperature value
-            ps->tx_desc[2].buf = ESC_SEQ_TEMPERATURE;
-            ps->tx_desc[2].len = sizeof(ESC_SEQ_TEMPERATURE)-1;
+            // Setting up the temperature value
+			ps->tx_desc[2].buf = ESC_SEQ_TEMPERATURE;
+			ps->tx_desc[2].len = sizeof(ESC_SEQ_TEMPERATURE)-1;
+            
             ps->tx_desc[3].buf = ps->temp_buf;
             ps->tx_desc[3].len = strlen(ps->temp_buf);
             
-            // Setup altitude value
+            // Setting up the altitude value
             ps->tx_desc[4].buf = ESC_SEQ_ALTITUDE;
             ps->tx_desc[4].len = sizeof(ESC_SEQ_ALTITUDE)-1;
             ps->tx_desc[5].buf = ps->alt_buf;
@@ -462,16 +527,29 @@ static void prog_loop_one(prog_state_t *ps)
             ps->tx_desc[9].buf = ps->hum_buf;
             ps->tx_desc[9].len = strlen(ps->hum_buf);
             
+            
+			// Echo back the received packet as a hex dump.
+			//memset(ps->tx_buf, 0, sizeof(ps->tx_buf));
+
+            //snprintf(stat_buf, 25, "\033[12;16H\033[0K %s");
+            
             ps->flags |= PROG_FLAG_GEN_COMPLETE;
-		}
-		
+            //ps->flags |= PROG_FLAG_RESET_COMPLETE;
+            
+            //ps->rx_desc_blen = 0;
+        }
+            
 		if (platform_usart_cdc_tx_async(&ps->tx_desc[0], 10)) {
+			//ps->rx_desc.compl_type = PLATFORM_USART_RX_COMPL_NONE;
+			//platform_usart_cdc_rx_async(&ps->rx_desc);
 			ps->flags &= ~(PROG_FLAG_UPDATE_PENDING | PROG_FLAG_GEN_COMPLETE);
 		}
-	} while (0);
+	} 
+    while (0);
 	
 	// Done
 	return;
+    
 }
 
 // main() -- the heart of the program
@@ -481,6 +559,7 @@ int main(void)
 	
 	// Initialization time	
 	prog_setup(&ps);
+    SERCOM2_I2C_Initialize();
 	
 	/*
 	 * Microcontroller main()'s are supposed to never return (welp, they
@@ -491,5 +570,5 @@ int main(void)
 	}
     
     // This line must never be reached
-    return 0;
+    return 1;
 }
