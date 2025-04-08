@@ -1,0 +1,469 @@
+// Common include for the XC32 compiler
+#include <xc.h>
+#include <string.h>
+#include <stdio.h>
+#include <stdbool.h>
+
+#include "../platform.h"
+
+/////////////////////////////////////////////////////////////////////////////
+
+/*
+ * Copyright message printed upon reset
+ * 
+ * Displaying author information is optional; but as always, must be present
+ * as comments at the top of the source file for copyright purposes.
+ * 
+ * FIXME: Modify this prompt message to account for additional instructions.
+ */
+static const char banner_msg[] =
+"\033[0m\033[2J\033[1;1H"
+"+--------------------------------------------------------------------+\r\n"
+"| EEE 158: Electrical and Electronics Engineering Laboratory V       |\r\n"
+"|          Academic Year 2024-2025, Semester 1                       |\r\n"
+"|                                                                    |\r\n"
+"| Solution: \"Graded Exercise\"                                        |\r\n"
+"|                                                                    |\r\n"
+"| Author:  EEE 158 Handlers (Almario, de Villa, Nierva, Sison, Tuso) |\r\n"
+"| Date:    21 Oct 2024                                               |\r\n"
+"+--------------------------------------------------------------------+\r\n"
+"\r\n" 
+"Temperature:\r\n"
+"Blink Setting:";
+
+static const char ESC_SEQ_TEMPERATURE[] = "\033[11;18H\033[0K";
+static const char ESC_SEQ_IDLE_INF[]  = "\033[12;1H\033[0K";
+static const char ESC_SEQ_LED_STATE_LINE[] = "\033[12;16H\033[0K";
+
+volatile char led_mode_str[15] = "[ OFF    ]";
+volatile char stat_buf [35];
+ 
+//////////////////////////////////////////////////////////////////////////////
+#define BME280_ADDR              0x76  //default I2C address, low address, so when it is high it will be 0x77
+#define BME280_REG_ID            0xD0  //stores the chip ID of the BME280. if we read from this register, the program will know that this is the BME280
+#define BME280_CHIP_ID           0x60  //unique identifier for verification and error detection
+                                       //will use this to compare later to verify if the correct id is placed
+#define BME280_REG_RESET         0xE0  //allows for BME280 "soft reset" but only for the sensor. 
+                                       //if we write 0xB6 to this register, it does the soft reset (accd. to Bosch mauf.)
+#define BME280_REG_CTRL_HUMIDITY 0xF2  //regsiter controls the humidty measurement (also oversampling)
+                                       //Bits [2:0] control oversampling:
+                                       //000: Humidity measurement skipped
+                                       //001: 1◊ oversampling (default)
+                                       //010: 2◊ oversampling
+                                       //011: 4◊ oversampling
+                                       //100: 8◊ oversampling
+                                       //101: 16◊ oversampling NOTE: Higher oversampling is more accurate, but uses more power
+#define BME280_REG_CTRL_MEAS     0xF4  //temperature and pressure measurement (oversampling and power mode)
+                                       //use 0x27 (00100111 binary), which means:
+                                       //Temperature: 1◊ oversampling
+                                       //Pressure: 1◊ oversampling
+                                       //Mode: Normal mode
+#define BME280_REG_CONFIG        0xF5  //configures stand-by time, filter settings, and enabling or disabling the SPI (we don't need because I2C!)
+                                       //Bits [7:5]: Standby time in normal mode:
+                                       //000: 0.5ms
+                                       //001: 62.5ms
+                                       //010: 125ms and so on
+                                       //Bits [4:2]: Filter coefficient:
+                                       //000: Filter off
+                                       //001: 2◊ filter
+                                       //010: 4◊ filter and so on
+                                       //Bit [0]: SPI interface mode (not relevant for I2C)
+#define BME280_REG_DATA          0xF7  //MSB of pressure measurement data (full pressure valve requires additional reading bytes)
+                                       //Pressure uses F7 to F9 (3-bytes, 20 bits)
+                                       //Temperature uses FA to FC (also 3-bytes)
+                                       //Humidity uses FD and FE (2-bytes, 16 bits)
+#define BME280_REG_CALIB         0x88  //base address for calibrating data that stores the raw data that the sensor outputs
+                                       //basically, not yet the final values since we are just getting it from non-volatile memory
+                                       //from 0x88 to 0xA1, we have the Temp. Callib, 6 bytes (T1, T2, T3) and then Pres. Callib, 18 bytes (P1 to P9)
+#define BME280_REG_CALIB_H1      0xA1  //contains H1 (first humidity data, separate from others)
+#define BME280_REG_CALIB_H2      0xE1  //H2, then we reach till 0xE7 because we have till H6
+#define SEA_LVL_PRES         101355.0  //constant standard atmospheric pressure, Po1
+
+// Program state machine
+typedef struct prog_state_type
+{
+	// Flags for this program
+#define PROG_FLAG_BANNER_PENDING	0x0001	// Waiting to transmit the banner
+#define PROG_FLAG_UPDATE_PENDING	0x0002	// Waiting to transmit updates
+#define PROG_FLAG_PB_PRESSED        0x0004  // Flag for button is pressed
+#define PROG_FLAG_RESET_PENDING     0x0008  // reset is pending
+#define PROG_FLAG_RESET_COMPLETE    0x0010  // reset is complete
+#define PROG_FLAG_GEN_COMPLETE		0x8000	// Message generation has been done, but transmission has not occurred
+
+#define PROG_FLAG_LED_MODE_0        0x0001  // Flag for each LED mode
+#define PROG_FLAG_LED_MODE_1        0x0002
+#define PROG_FLAG_LED_MODE_2        0x0004
+#define PROG_FLAG_LED_MODE_3        0x0008
+#define PROG_FLAG_LED_MODE_4        0x0010
+#define PROG_FLAG_LED_CHANGED       0x0020  // Flag for if the LED state is changed
+    
+	uint16_t flags;
+    
+    uint16_t led_mode;
+	
+	// Transmit stuff
+	platform_usart_tx_bufdesc_t tx_desc[4];
+	char tx_buf[64];
+	uint16_t tx_blen;
+    
+    char temp_buf[20];
+	
+	// Receiver stuff
+	platform_usart_rx_async_desc_t rx_desc;
+	uint16_t rx_desc_blen;
+	char rx_desc_buf[16];
+    
+    float temperature;
+} prog_state_t;
+
+typedef struct {
+    uint16_t T1;
+    int16_t  T2, T3; //calibration for temperature measure which includes compensation of formula and temp corrections
+    uint16_t P1;
+    int16_t  P2, P3, P4, P5, P6, P7, P8, P9; //calibration for pressure measurement
+    uint8_t  H1, H3;
+    int16_t  H2, H4, H5; //humidity calibration
+    int8_t   H6;
+} BME280_CalibData;
+
+static BME280_CalibData cal_data; //storing the parameters of the calibration to the BME280 Sensor
+static int32_t t_fine; //placeholder for the temperature value computation
+
+uint8_t BME280_INIT(void);
+void BME280_READ_ALL(float *temp, float *pres, float *hum); //we want to be able to modify the temp, pressure, and humidity by updating the float values
+                                                                     //these are all used as "pointer parameters". this is modified in a single function now.
+                                                                     //precise floating point values since we are displaying as Celcius, Pa, etc.
+float BME280_ALT(float pressure); //barometric formula: altitude = 44330(1 - (P/Po)^0.19029495) where P is the measured pressure in hPa and then Po is 1013.25 hPa
+
+//i2c functions
+static uint8_t BME_WRITE_REG(uint8_t reg, uint8_t val){
+    uint8_t buf[2] = {reg, val}; //buf[0] register addr. buf[1] data to write
+    return SERCOM2_I2C_Write_Polled(BME280_ADDR, buf, 2) == 2; //writing now to the BME280_ADDR, 2 BYTES
+}
+
+//i2c read operations:
+static uint8_t BME_READ_REG(uint8_t reg){ //reading a single register
+    uint8_t val;
+    SERCOM2_I2C_Write_Polled(BME280_ADDR, &reg, 1);
+    SERCOM2_I2C_Read_Polled(BME280_ADDR, &val, 1); // reading and writing 1 byte from the register
+    return val;
+}
+
+static void BME_READ_MUL_REG(uint8_t reg, uint8_t *buf, uint8_t len){ //reads a block of registers
+    SERCOM2_I2C_Write_Polled(BME280_ADDR, &reg, 1); //write register addr.
+    SERCOM2_I2C_Read_Polled(BME280_ADDR, buf, len); //reading len number of bytes
+}
+
+// initializing the sensor
+uint8_t BME280_INIT(void){
+    uint8_t id = BME_READ_REG(BME280_REG_ID);
+    if(id != BME280_CHIP_ID) return 0; // assigning the id
+    
+    // reset
+    BME_WRITE_REG(BME280_REG_RESET, 0xB6); // reset value 0xB6
+    
+    // delay for 10ms
+    uint16_t i;
+    for(i = 0; i < 5000; i++) asm("nop");
+    
+    // read the data of temp and pressure (registers 0x88 to 0x9F)
+    uint8_t buf[24]; // 2 bytes per calibration parameter
+    BME_READ_MUL_REG(BME280_REG_CALIB, buf, 24);
+    
+    cal_data.T1 = (buf[1] << 8) | buf[0]; // MSB | LSB
+    cal_data.T2 = (buf[3] << 8) | buf[2];
+    cal_data.T3 = (buf[5] << 8) | buf[4];
+    cal_data.P1 = (buf[7] << 8) | buf[6];
+    cal_data.P2 = (buf[9] << 8) | buf[8];
+    cal_data.P3 = (buf[11] << 8) | buf[10];
+    cal_data.P4 = (buf[13] << 8) | buf[12];
+    cal_data.P5 = (buf[15] << 8) | buf[14];
+    cal_data.P6 = (buf[17] << 8) | buf[16];
+    cal_data.P7 = (buf[19] << 8) | buf[18];
+    cal_data.P8 = (buf[21] << 8) | buf[20];
+    cal_data.P9 = (buf[23] << 8) | buf[22];
+    
+    //humidity calibration
+    cal_data.H1 = BME_READ_REG(BME280_REG_CALIB_H1);
+    
+    BME_READ_MUL_REG(BME280_REG_CALIB_H2, buf, 7);
+    cal_data.H2 = (buf[1] << 8) | buf[0];
+    cal_data.H3 = buf[2];
+    cal_data.H4 = (buf[3] << 4) | (buf[4] & 0x0F);
+    cal_data.H5 = (buf[5] << 4) | (buf[4] >> 4);
+    cal_data.H6 = buf[6];
+    
+    return 1;
+    
+}
+void BME280_READ_ALL(float *temp, float *pres, float *hum){
+    // formula from the BME280 datasheet section 4.2.3 - Compensation Formulas
+    uint8_t data[8];
+    int32_t raw_T, raw_P, raw_H; // raw values for temp, pres, and humidity
+                                 // data sheet uses adc, but to lessen confusion, used raw
+    
+    BME_READ_MUL_REG(BME280_REG_DATA, data, 8); // read all data at the same time
+    
+    raw_T = ((uint32_t) data[3] << 12) | ((uint32_t) data[4] << 4) | (data[5] >> 4);
+    raw_P = ((uint32_t) data[0] << 12) | ((uint32_t) data[1] << 4) | (data[2] >> 4);
+    raw_H = ((uint32_t) data[6] << 8)  | data[7];
+    
+    int32_t var1, var2;
+    var1 = ((((raw_T >> 3) - ((int32_t)cal_data.T1 << 1))) * ((int32_t)cal_data.T2)) >> 11;
+    var2 = (((((raw_T >> 4) - ((int32_t)cal_data.T1)) * ((raw_T >> 4) - ((int32_t)cal_data.T1))) >> 12) * ((int32_t)cal_data.T3)) >> 14;
+    t_fine = var1 + var2;
+    
+    *temp = (t_fine * 5 + 128) >> 8;
+    *temp/= 100.0f; // convert to degrees celcius by dividing w/ 100
+    
+}
+/*
+ * Initialize the main program state
+ * 
+ * This style might be familiar to those accustomed to he programming
+ * conventions employed by the Arduino platform.
+ */
+static void prog_setup(prog_state_t *ps)
+{
+	memset(ps, 0, sizeof(*ps));
+	
+	platform_init();
+	
+	ps->rx_desc.buf     = ps->rx_desc_buf;
+	ps->rx_desc.max_len = sizeof(ps->rx_desc_buf);
+    
+    ps->flags |= PROG_FLAG_BANNER_PENDING;
+    ps->flags |= PROG_FLAG_UPDATE_PENDING;
+    ps->flags |= PROG_FLAG_PB_PRESSED;
+    ps->led_mode |= PROG_FLAG_LED_MODE_0;
+	
+	platform_usart_cdc_rx_async(&ps->rx_desc);
+	return;
+}
+
+/*
+ * Do a single loop of the main program
+ * 
+ * This style might be familiar to those accustomed to he programming
+ * conventions employed by the Arduino platform.
+ */
+static void prog_loop_one(prog_state_t *ps)
+{
+	uint16_t a = 0, b = 0, c = 0;
+	
+	// Do one iteration of the platform event loop first.
+	platform_do_loop_one();
+	
+	
+    /* IGGY COMMENT
+     *  The program seems to be coded around a "flag" based programming 
+     *  paradigm (i.e., set flags, then process)
+     * 
+     * `platform_pb_get_event()` returns
+     *  debounced PB state from EIC
+     */
+    
+    // Something happened to the pushbutton?    
+	if ((a = platform_pb_get_event()) != 0) {
+        ps->flags |= PROG_FLAG_UPDATE_PENDING;
+        
+        if ((a & PLATFORM_PB_ONBOARD_PRESS) != 0) {
+			// Print out the banner
+			ps->flags |= PROG_FLAG_PB_PRESSED;
+		} else {
+            ps->flags &= ~PROG_FLAG_PB_PRESSED;
+        }
+        
+		a = 0;
+	}
+
+	// Something received from the UART?
+	if (ps->rx_desc.compl_type == PLATFORM_USART_RX_COMPL_DATA) {
+		/*
+		 * There's something.
+		 * 
+		 * The completion-info payload contains the number of bytes
+		 * read into the receive buffer.
+		 */ 
+		ps->flags |= PROG_FLAG_UPDATE_PENDING;
+		ps->rx_desc_blen = ps->rx_desc.compl_info.data_len;
+	}
+    
+    // CTRL + E / HOME pressed?
+    if (ps->flags & PROG_FLAG_RESET_PENDING) {
+        
+        ps->flags |= PROG_FLAG_BANNER_PENDING;
+        ps->flags |= PROG_FLAG_UPDATE_PENDING;
+        
+        ps->rx_desc_blen = ps->rx_desc.compl_info.data_len;
+        ps->flags &= ~PROG_FLAG_RESET_COMPLETE;
+        ps->flags &= ~PROG_FLAG_RESET_PENDING;
+    }
+	
+	////////////////////////////////////////////////////////////////////
+	
+	// Process any pending flags (BANNER)
+	do {
+        /*
+         * If flag doesn't need to be rendered, it won't
+         */
+		if ((ps->flags & PROG_FLAG_BANNER_PENDING) == 0)
+			break;
+		
+		if (platform_usart_cdc_tx_busy())
+			break;
+		
+		if ((ps->flags & PROG_FLAG_GEN_COMPLETE) == 0) {
+			// Message has not been generated.
+			ps->tx_desc[0].buf = banner_msg;
+			ps->tx_desc[0].len = sizeof(banner_msg)-1;
+            
+			ps->flags |= PROG_FLAG_GEN_COMPLETE;
+		}
+        
+		if (platform_usart_cdc_tx_async(&ps->tx_desc[0], 1)) {
+			ps->flags &= ~(PROG_FLAG_BANNER_PENDING | PROG_FLAG_GEN_COMPLETE);
+		}
+	} while (0);
+	
+	// Process any pending flags (UPDATE)
+	do {
+        
+		if ((ps->flags & PROG_FLAG_UPDATE_PENDING) == 0)
+			break;
+		
+		if (platform_usart_cdc_tx_busy())
+			break;
+        
+        /* IGGY COMMENTS
+         *  GEN_COMPLETE is "generation has been done, transmission not occurred"
+         * 
+         *  ESC_SEQ_KEYP_LINE is \033 [11;39H     \033 [0K
+         *                       ESC  MOVE CURSOR ESC  ERASE FROM CURSOR -> EOL
+         * 
+         *  ESC_SEQ_IDLE_INF  is \033  [12;1H
+         *                       ESC   MOVE CURSOR
+         * 
+         *  From some extrapolation via trial and error,
+         *  the program writes tx_desc[0], then tx_desc[1], and then tx_desc[2].
+         * 
+         *  tx_desc gets written to wherever ESC_SEQ_KEYP_LINE is
+         */
+		if ((ps->flags & PROG_FLAG_GEN_COMPLETE) == 0 || (ps->flags & PROG_FLAG_RESET_COMPLETE) == 0) { 
+			// Message has not been generated.
+            ps->tx_desc[0].buf = ESC_SEQ_TEMPERATURE;
+            ps->tx_desc[0].len = sizeof(ESC_SEQ_TEMPERATURE)-1;
+
+			memset(ps->tx_buf, 0, sizeof(ps->tx_buf));
+            
+            // if PB is pressed
+            if (ps->flags & PROG_FLAG_PB_PRESSED) {
+                // Print out the banner
+                ps->tx_desc[1].buf = snprintf(ps->temp_buf, sizeof(ps->temp_buf), "%.2f C", ps->temperature);
+                ps->tx_desc[1].len = sizeof(ESC_SEQ_TEMPERATURE)-1;
+            } else {
+                ps->tx_desc[1].buf = "[Released]";
+                ps->tx_desc[1].len = 10;
+            }
+
+            // if a character is received
+			if (ps->rx_desc_blen > 0) {                
+                uint16_t recvd_key = (ps->rx_desc_buf[0] & 0x00FF);
+                uint16_t recvd_key_long = recvd_key | (ps->rx_desc_buf[2] & 0x00FF) << 8;
+                
+                // if a, A, left
+                if (recvd_key == 0x61 || recvd_key == 0x41 || recvd_key_long == 0x441B) {
+                    // if led_state isn't at the very left, adjust 
+                    if (ps->led_mode != 1) {
+                       ps->led_mode = ps->led_mode >> 1;
+                       
+                       // indicate that the LED state has changed
+                       ps->flags |= PROG_FLAG_LED_CHANGED;
+                    }
+                } 
+                
+                // if d, D, right
+                if (recvd_key == 0x64 || recvd_key == 0x44 || recvd_key_long == 0x431B) {
+                    // if led_state isn't at the very right, adjust
+                    if (ps->led_mode != (1 << 4)) {
+                       ps->led_mode = ps->led_mode << 1;
+                       
+                       // indicate that the LED state has changed
+                       ps->flags |= PROG_FLAG_LED_CHANGED;
+                    }
+                }  
+                
+                // if ctrl+E, HOME
+                if (recvd_key == 0x05 || recvd_key_long == 0x311B) {
+                    ps->flags |= PROG_FLAG_RESET_PENDING;
+                }
+			} 
+            
+            
+            // Only set the TCC PER and CC[1] if an LED state change was 
+            // detected
+            if (ps->flags & PROG_FLAG_LED_CHANGED) {
+                switch (ps->led_mode) {
+                    case PROG_FLAG_LED_MODE_0:
+                        platform_blink_modify(11718, 11717);
+                        break;
+                    case PROG_FLAG_LED_MODE_1:
+                        platform_blink_modify(21092, 23436);
+                        break;
+                    case PROG_FLAG_LED_MODE_2:
+                        platform_blink_modify(9373, 11717);
+                        break;
+                    case PROG_FLAG_LED_MODE_3:
+                        platform_blink_modify(3515, 7030);
+                        break;
+                    case PROG_FLAG_LED_MODE_4:   
+                        platform_blink_modify(0, 7030);
+                        break;
+                }
+                
+                ps->flags &= ~PROG_FLAG_LED_CHANGED;
+            }
+            
+            snprintf(stat_buf, 25, "\033[12;16H\033[0K %s", led_mode_str);
+            
+            ps->tx_desc[2].buf = stat_buf;
+            ps->tx_desc[2].len = 25;
+            
+            ps->flags |= PROG_FLAG_GEN_COMPLETE;
+            ps->flags |= PROG_FLAG_RESET_COMPLETE;
+            
+            ps->rx_desc_blen = 0; 
+		}
+		
+		if (platform_usart_cdc_tx_async(&ps->tx_desc[0], 3)) {
+			ps->rx_desc.compl_type = PLATFORM_USART_RX_COMPL_NONE;
+			platform_usart_cdc_rx_async(&ps->rx_desc);
+			ps->flags &= ~(PROG_FLAG_UPDATE_PENDING | PROG_FLAG_GEN_COMPLETE);
+		}
+		
+		
+	} while (0);
+	
+	// Done
+	return;
+}
+
+// main() -- the heart of the program
+int main(void)
+{
+	prog_state_t ps;
+	
+	// Initialization time	
+	prog_setup(&ps);
+	
+	/*
+	 * Microcontroller main()'s are supposed to never return (welp, they
+	 * have none to return to); hence the intentional infinite loop.
+	 */
+	for (;;) {
+		prog_loop_one(&ps);
+	}
+    
+    // This line must never be reached
+    return 1;
+}
