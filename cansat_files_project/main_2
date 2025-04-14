@@ -89,20 +89,21 @@ typedef struct prog_state_type
 #define PROG_FLAG_RESET_PENDING     0x0008  // reset is pending
 #define PROG_FLAG_RESET_COMPLETE    0x0010  // reset is complete
 #define PROG_FLAG_GEN_COMPLETE		0x8000	// Message generation has been done, but transmission has not occurred
-
+/*
 #define PROG_FLAG_LED_MODE_0        0x0001  // Flag for each LED mode
 #define PROG_FLAG_LED_MODE_1        0x0002
 #define PROG_FLAG_LED_MODE_2        0x0004
 #define PROG_FLAG_LED_MODE_3        0x0008
 #define PROG_FLAG_LED_MODE_4        0x0010
 #define PROG_FLAG_LED_CHANGED       0x0020  // Flag for if the LED state is changed
-    
+*/  
 	uint16_t flags;
     
-    uint16_t led_mode;
+    //uint16_t led_mode;
 	
 	// Transmit stuff
-	platform_usart_tx_bufdesc_t tx_desc[4];
+	platform_usart_tx_bufdesc_t tx_desc[4]; // i think this 4 here is the reason why we are limited to 0,1,2,3 (when i tried 2, it didnt work na because it waS used somewhere else)
+	// maybe reducing the need for multipledesc to one print would work, but yes increasing the number inside tx_desc might help display more values
 	char tx_buf[64];
 	uint16_t tx_blen;
     
@@ -235,7 +236,7 @@ static void prog_setup(prog_state_t *ps)
     ps->flags |= PROG_FLAG_BANNER_PENDING;
     ps->flags |= PROG_FLAG_UPDATE_PENDING;
     ps->flags |= PROG_FLAG_PB_PRESSED;
-    ps->led_mode |= PROG_FLAG_LED_MODE_0;
+    //ps->led_mode |= PROG_FLAG_LED_MODE_0;
 	
 	platform_usart_cdc_rx_async(&ps->rx_desc);
 	return;
@@ -359,7 +360,10 @@ static void prog_loop_one(prog_state_t *ps)
             // if PB is pressed
             if (ps->flags & PROG_FLAG_PB_PRESSED) {
                 // Print out the banner
-                ps->tx_desc[1].buf = snprintf(ps->temp_buf, sizeof(ps->temp_buf), "%.2f C", ps->temperature);
+                //ps->tx_desc[1].buf = snprintf(ps->temp_buf, sizeof(ps->temp_buf), "%.2f C", ps->temperature);
+		sprintf(ps->temp_buf, sizeof(ps->temp_buf), "%.2f C", ps->temperature);
+		ps->tx_desc[1].buf = ps->temp_buf;
+		ps->tx_desc[1].len = strlen(ps->temp_buf);
                 ps->tx_desc[1].len = sizeof(ESC_SEQ_TEMPERATURE)-1;
             } else {
                 ps->tx_desc[1].buf = "[Released]";
@@ -370,7 +374,7 @@ static void prog_loop_one(prog_state_t *ps)
 			if (ps->rx_desc_blen > 0) {                
                 uint16_t recvd_key = (ps->rx_desc_buf[0] & 0x00FF);
                 uint16_t recvd_key_long = recvd_key | (ps->rx_desc_buf[2] & 0x00FF) << 8;
-                
+/*
                 // if a, A, left
                 if (recvd_key == 0x61 || recvd_key == 0x41 || recvd_key_long == 0x441B) {
                     // if led_state isn't at the very left, adjust 
@@ -398,10 +402,10 @@ static void prog_loop_one(prog_state_t *ps)
                     ps->flags |= PROG_FLAG_RESET_PENDING;
                 }
 			} 
-            
-            
+*/
             // Only set the TCC PER and CC[1] if an LED state change was 
             // detected
+/*
             if (ps->flags & PROG_FLAG_LED_CHANGED) {
                 switch (ps->led_mode) {
                     case PROG_FLAG_LED_MODE_0:
@@ -420,15 +424,16 @@ static void prog_loop_one(prog_state_t *ps)
                         platform_blink_modify(0, 7030);
                         break;
                 }
-                
+*/  
                 ps->flags &= ~PROG_FLAG_LED_CHANGED;
             }
-            
+
             snprintf(stat_buf, 25, "\033[12;16H\033[0K %s", led_mode_str);
             
             ps->tx_desc[2].buf = stat_buf;
             ps->tx_desc[2].len = 25;
-            
+
+
             ps->flags |= PROG_FLAG_GEN_COMPLETE;
             ps->flags |= PROG_FLAG_RESET_COMPLETE;
             
