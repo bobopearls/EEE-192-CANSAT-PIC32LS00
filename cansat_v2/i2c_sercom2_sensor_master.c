@@ -4,7 +4,8 @@
 // then the sercom2 clk init, init, set baud rates and then the pins we will use, etc.
 
 #include <xc.h>
-#include "i2c_sercom2_sensor_master.h"
+//#include "i2c_sercom2_sensor_master.h"
+
 
 void SERCOM2_I2C_Clock_Init(){
     // the APB C periperal clocks are already enabled by default so we dont need to enable it manually
@@ -301,10 +302,10 @@ uint16_t SERCOM2_I2C_Read_Polled(uint8_t addr, uint8_t *buf, uint16_t len) {
     SERCOM2_I2C_Read_Polled_Init(addr, buf, len, S_condt);
 }
 
-uint8_t SERCOM2_I2C_ReadReg(uint8_t i2c_addr, uint8_t reg_addr, uint8_t *buf, uint8_t read_len) {
-    uint8_t tmp[1] = {reg_addr};
+uint8_t SERCOM2_I2C_ReadReg(uint8_t addr, uint8_t reg, uint8_t *buf, uint8_t len) {
+    uint8_t tmp[1] = {reg};
     StopCondition S_condt = ACK_THEN_REPEATED_START;
-    SERCOM2_I2C_Write_Polled_Init(i2c_addr, tmp, 1, S_condt);
-    SERCOM2_I2C_Read_Polled_Init(i2c_addr, buf, read_len, S_condt);
+    SERCOM2_I2C_Write_Polled_Init(addr, tmp, 1, S_condt);
+    SERCOM2_I2C_Read_Polled_Init(addr, buf, len, S_condt);
     return 0;
 }
