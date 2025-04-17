@@ -4,7 +4,7 @@
 // then the sercom2 clk init, init, set baud rates and then the pins we will use, etc.
 
 #include <xc.h>
-//#include "i2c_sercom2_sensor_master.h"
+#include "i2c_sercom2_sensor_master.h" // error with the stopcondition not being recognized is fixed with this
 
 
 void SERCOM2_I2C_Clock_Init(){
