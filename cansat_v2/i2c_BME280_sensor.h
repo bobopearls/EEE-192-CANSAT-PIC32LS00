@@ -58,7 +58,7 @@ void    BME280_SoftReset(void);
 void    BME280_Init(void);
 void    BME280_ReadCalibData(BME280_CalibData* calib);
 void    BME280_Configure(void);
-void    BME280_ReadRawData(int32_t* rawTemp, int32_t* rawPress, int32_t* rawHumid);
+void    BME280_ReadRawData(uint32_t* rawTemp, uint32_t* rawPress, uint32_t* rawHumid);
 float   BME280_CompensateTemperature(int32_t rawTemp, BME280_CalibData* calib, int32_t* t_fine);
 float   BME280_CompensatePressure(int32_t rawPress, BME280_CalibData* calib, int32_t t_fine);
 float   BME280_CompensateHumidity(int32_t rawHumid, BME280_CalibData* calib, int32_t t_fine);
