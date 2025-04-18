@@ -5,13 +5,9 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
-#include "i2c_BME280_sensor.h"
 
-void __delay_ms(uint32_t ms) {
-    for (uint32_t i = 0; i < ms * 1000; i++) {
-        __asm__ __volatile__("nop");
-    }
-}
+#include "i2c_BME280_sensor.h"
+#include "i2c_sercom2_sensor_master.h"
 
 static BME280_CalibData calib_data; // sensor calibration data from the h file
 // data here will be used to calculate the actual temp, pressure, and humidity
