@@ -1,9 +1,9 @@
 #include <xc.h>
 #include <stdint.h>
 #include <stdbool.h>
-#include "i2c_BME280_sensor.h"
+//#include "i2c_BME280_sensor.h"
 #include "i2c_BME280_sensor.c"
-#include "i2c_sercom2_sensor_master.h"
+//#include "i2c_sercom2_sensor_master.h"
 #include "platform.h"
 
 void __delay_ms(uint32_t ms) {
