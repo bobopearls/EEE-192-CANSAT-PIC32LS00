@@ -4,7 +4,8 @@
 /* the sensor's main purpose is to detect things like:
 /* house dust and cigarette smoke (which contains particles we want to measure)
 /* 
-/* Code written by: QUITORIANO, Maria Louise C. for EEE 192 Class
+/* Code written by: QUITORIANO, Maria Louise C. 
+/* for EEE 192 Class (template taken from EEE 158)
 *///////////////////////////////////////////////////////////////////////////////
 
 // PORTS USED:
