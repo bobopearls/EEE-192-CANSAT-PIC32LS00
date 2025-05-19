@@ -1,7 +1,3 @@
-// just add all the files together since they have different functions anyway
-// they all use the same usart, i2c_host,etc. modules
-
-// order of priority: neo6m, bme280, scd41, adc sensor
 #include <xc.h>
 #include <string.h>
 #include <stdio.h>
@@ -9,7 +5,7 @@
 #include <math.h>
 #include "platform.h"
 
-// BME280 DECLARATIONS
+
 #define BME280_ADDR              0x76  //default I2C address, low address, so when it is high it will be 0x77
 #define BME280_REG_ID            0xD0  //stores the chip ID of the BME280. if we read from this register, the program will know that this is the BME280
 #define BME280_CHIP_ID           0x60  //unique identifier for verification and error detection
@@ -50,10 +46,14 @@
 #define BME280_REG_CALIB_H2      0xE1  //H2, then we reach till 0xE7 because we have till H6
 #define SEA_LVL_PRES         101355.0  //constant standard atmospheric pressure, Po1
 
+// ADC definitions for dust sensor
+#define ADC_VREF 3.3f
+#define ADC_RESOLUTION 4095.0f  // 12-bit ADC resolution
+#define CLEAN_AIR_VOLTAGE 0.9f  // Clean air baseline voltage
+#define DUST_CONVERSION_FACTOR 5.0f  // Conversion factor for dust density
+
 #define LOOP_DELAY 6000000 // ~5 seconds
 
-////////////////////////////////////////////////////////////////////////////////
-// NOTE THIS IS USED FOR ALL FOR THE PRINTING OF THE BANNER. not just bme280
 static const char banner_msg[] =
 "\033[0m\033[2J\033[1;1H"
 "";
@@ -63,17 +63,11 @@ typedef struct prog_state_type {
     uint16_t flags;
     uint8_t lc;
     platform_usart_tx_bufdesc_t tx_desc[4];
-    char tx_buf[256];
+    char tx_buf[512];
     uint16_t tx_blen;
     platform_usart_rx_async_desc_t rx_desc;
     uint16_t rx_desc_blen;
     char rx_desc_buf[16];
-    
-    // BME280 readings
-    int32_t temperature;
-    uint32_t pressure;
-    uint32_t humidity;
-    float altitude;
 } prog_state_t;
 
 static void delay_loop(volatile uint32_t loops) {
@@ -87,10 +81,10 @@ static void usart_cdc_tx_blocking(const char *msg) {
         while (!(SERCOM3_REGS->USART_INT.SERCOM_INTFLAG & SERCOM_USART_INT_INTFLAG_DRE_Msk));
         SERCOM3_REGS->USART_INT.SERCOM_DATA = *msg++;
     }
+    delay_loop(5000);
 }
-////////////////////////////////////////////////////////////////////////////////
 
-//continue w/ the bme280 declarations
+// --- BME280 I2C Helpers ---
 static bool BME280_ReadReg(uint8_t reg, uint8_t *data, uint8_t len) {
     const uint8_t max_retries = 3;
     
@@ -103,7 +97,6 @@ static bool BME280_ReadReg(uint8_t reg, uint8_t *data, uint8_t len) {
                 return true;  // Success
             }
         }
-        
         // Wait before retry
         delay_loop(5000);
     }
@@ -125,6 +118,55 @@ static bool BME280_WriteReg(uint8_t reg, uint8_t value) {
     
     usart_cdc_tx_blocking("I2C write failed after retries\r\n");
     return false;
+}
+
+void ADC_INIT(void){
+    /* Reset ADC */
+    ADC_REGS->ADC_CTRLA = (1<<0) ;
+    while ((ADC_REGS->ADC_SYNCBUSY & (1<<0) ) == (1<<0)) ;
+    /* Prescaler */
+    ADC_REGS->ADC_CTRLB = (2<<0) ;
+    /* Sampling length */
+    ADC_REGS->ADC_SAMPCTRL = (3<<0) ;
+    /* Reference */
+    ADC_REGS->ADC_REFCTRL = (4<<0) ;
+    /* Input pin */
+    ADC_REGS->ADC_INPUTCTRL = (0<<0) ;
+    /* Resolution & Operation Mode */
+    ADC_REGS->ADC_CTRLC = (uint16_t) ((0<<4) | (0 <<10) ) ; //resolution was changed
+    /* Clear all interrupt flags */
+    ADC_REGS->ADC_INTFLAG = (uint8_t) 0x07 ;
+    while (0U != ADC_REGS->ADC_SYNCBUSY) ;
+}
+
+void ADC_ENABLE(void) {
+    ADC_REGS->ADC_CTRLA |= (1<<1);
+    while (0U != ADC_REGS->ADC_SYNCBUSY);
+}
+
+void ADC_ConversionStart(void) {
+    ADC_REGS->ADC_SWTRIG |= (1<<1);
+    while ((ADC_REGS->ADC_SYNCBUSY & (1<<10)) == (1<<10));
+}
+
+uint16_t ADC_ConversionGetRes(void) {
+    return (uint16_t)ADC_REGS->ADC_RESULT;
+}
+
+bool ADC_ConversionStatusGet(void) {
+    bool status;
+    status = (((ADC_REGS->ADC_INTFLAG & (1<<0)) >> 0) != 0U);
+    if (status == true) {
+        ADC_REGS->ADC_INTFLAG = (1<<0);
+    }
+    return status;
+}
+
+float calculate_dust_density(uint16_t adc_value) {
+    float voltage = (adc_value / ADC_RESOLUTION) * ADC_VREF;
+    float delta_v = voltage - CLEAN_AIR_VOLTAGE;
+    if (delta_v < 0.0f) delta_v = 0.0f;
+    return (delta_v / DUST_CONVERSION_FACTOR);
 }
 
 // --- Calibration Data ---
@@ -220,7 +262,34 @@ static uint32_t compensate_humidity(uint32_t raw_value) {
     return (uint32_t)(v_x1 >> 12);
 }
 
-// --- Init ---
+// --- Port initialization for ADC ---
+void PORT_INIT(void) {
+    // PA02 = ANALOG INPUT FOR THE SENSOR
+    PORT_SEC_REGS->GROUP[0].PORT_PINCFG[2] = 0x1U;
+    PORT_SEC_REGS->GROUP[0].PORT_PMUX[1] |= 0x1U;
+    
+    // PA04 AS THE EXTERNAL REF VOLTAGE REF_VREFB
+    PORT_SEC_REGS->GROUP[0].PORT_PINCFG[4] = 0x1U;
+    PORT_SEC_REGS->GROUP[0].PORT_PMUX[2] = 0x1U;
+    
+    // PA15 AS THE OUTPUT PIN GPIO_PA15 (kept for potential future use)
+    PORT_SEC_REGS->GROUP[0].PORT_DIRSET = (1<<15);
+    PORT_SEC_REGS->GROUP[0].PORT_PINCFG[15] = 0x0U;
+    PORT_SEC_REGS->GROUP[0].PORT_PMUX[7] = 0x0U;
+}
+
+// --- Clock initialization for ADC ---
+void CLOCK_INIT(void) {
+    // GCK0: Div factor 1 | Source Select 7 | Generic Clock Generator Enable
+    GCLK_REGS->GCLK_GENCTRL[0] = (1<<16) | (7<<0) | (1<<8);
+    while ((GCLK_REGS->GCLK_SYNCBUSY & (1<<2)) == 0);
+    
+    // ADC Bus Clock: Generic Clock Generator Value | Channel Enable
+    GCLK_REGS->GCLK_PCHCTRL[28] = (0<<0) | (1<<6);
+    while ((GCLK_REGS->GCLK_PCHCTRL[28] & (1<<6)) != (1<<6));
+}
+
+// --- BME Init ---
 void bme280_init(void) {
     uint8_t id;
     if (BME280_ReadReg(BME280_REG_ID, &id, 1) && id == BME280_CHIP_ID) {
@@ -236,7 +305,7 @@ void bme280_init(void) {
 }
 
 // --- Read & convert with forced mode ---
-void BME280_Read(prog_state_t *ps) {
+void Read_All_Sensors(prog_state_t *ps) {
     // Trigger a new measurement in forced mode
     if (!BME280_WriteReg(BME280_REG_CTRL_MEAS, 0x25)) {  // Start forced measurement
         usart_cdc_tx_blocking("Failed to trigger measurement\r\n");
@@ -272,16 +341,61 @@ void BME280_Read(prog_state_t *ps) {
     uint32_t adc_H = ((uint32_t)raw[6] << 8) | raw[7];
 
     // Use the updated compensation functions
-    //int32_t temp = compensate_temperature(adc_T);       // °C * 100
-    //uint32_t press = compensate_pressure(adc_P);        // Pa
-    //uint32_t hum = compensate_humidity(adc_H);          // %RH * 1024
-    //float altitude = 44330.0 * (1.0 - pow((press / 100.0) / 1013.25, 0.1903)); // computed using pressure
-    // by this point, all computed values are ready
+    int32_t temp = compensate_temperature(adc_T);       // °C * 100
+    uint32_t press = compensate_pressure(adc_P);        // Pa
+    uint32_t hum = compensate_humidity(adc_H);          // %RH * 1024
+    float altitude = 44330.0 * (1.0 - pow((press / 100.0) / 1013.25, 0.1903)); // computed using pressure
     
-    ps->temperature = compensate_temperature(adc_T);
-    ps->pressure = compensate_pressure(adc_P);
-    ps->humidity = compensate_humidity(adc_H);
-    ps->altitude = 44330.0 * (1.0 - pow((ps->pressure / 100.0) / 1013.25, 0.1903)); // these are all declared at the top
+    //then read the adc dust sensor
+    ADC_ConversionStart();
+    while (!ADC_ConversionStatusGet());
+    uint16_t dust_adc_value = ADC_ConversionGetRes();
+    float dust_density = calculate_dust_density(dust_adc_value);
+    
+    // Determine dust level status and color
+    const char *dust_status;
+    const char *dust_color;
+    
+    if (dust_density > 0.5f) {
+        dust_status = "HIGH DUST LEVEL - UNHEALTHY";
+        dust_color = "\033[1;31m";  // Bright red
+    } else if (dust_density > 0.2f) {
+        dust_status = "MODERATE DUST LEVEL";
+        dust_color = "\033[1;33m";  // Bright yellow
+    } else {
+        dust_status = "CLEAN AIR";
+        dust_color = "\033[1;32m";  // Bright green
+    }
+    
+    delay_loop(15000);
+
+
+    // Format and print combined readings
+    snprintf(ps->tx_buf, sizeof(ps->tx_buf),
+        "\033[2J\033[H"  // Clear screen and move cursor to top-left
+        "\033[1;36m=== ENVIRONMENTAL SENSOR READINGS ===\033[0m\r\n"
+        "\033[1;35mTemperature:\033[0m %ld.%02ld °C\r\n"
+        "\033[1;34mPressure:   \033[0m %.2f hPa\r\n"
+        "\033[1;32mHumidity:   \033[0m %.2f %%\r\n"
+        "\033[1;31mAltitude:   \033[0m %.2lf m\r\n"
+        "\033[1;36m=====================================\033[0m\r\n"
+        "%sDust Density:\033[0m %.2f mg/m³\r\n"
+        "%sStatus: %s\033[0m\r\n"
+        "\033[1;90mRaw ADC: %u\033[0m\r\n"
+        "\033[1;36m=====================================\033[0m\r\n",
+        temp/100, temp % 100,           // Temperature in °C
+        press / 100.0,                  // Pressure in hPa
+        hum / 1024.0,                   // Humidity in %
+        altitude,                       // Altitude in meters
+        dust_color,                     // Dust level color
+        dust_density,                   // Dust density in mg/m³
+        dust_color,                     // Status color
+        dust_status,                    // Status text
+        dust_adc_value                  // Raw ADC value for debugging
+    );
+    
+    usart_cdc_tx_blocking(ps->tx_buf);
+    delay_loop(30000);
 }
 
 // --- Reset I2C if needed ---
@@ -304,11 +418,21 @@ static void reset_i2c_if_needed(void) {
 // --- Setup ---
 static void prog_setup(prog_state_t *ps) {
     memset(ps, 0, sizeof(*ps));
-    platform_init();
+    platform_init(); // uart init
+    // ADC INIT
+    PORT_INIT();
+    CLOCK_INIT();
+    
+    //I2C INIT
     SERCOM2_I2C_Initialize();
     bme280_init();
+    
+    //ADC DUST SENSOR
+    ADC_INIT();
+    ADC_ENABLE();
 
     usart_cdc_tx_blocking(banner_msg);
+    usart_cdc_tx_blocking("Combined BME280 + Dust Sensor initialized\r\n");
 
     ps->rx_desc.buf = ps->rx_desc_buf;
     ps->rx_desc.max_len = sizeof(ps->rx_desc_buf);
@@ -319,196 +443,17 @@ static void prog_setup(prog_state_t *ps) {
 static void prog_loop_one(prog_state_t *ps) {
     platform_do_loop_one();
     reset_i2c_if_needed();  // Check and reset I2C if needed
-    BME280_Read(ps);
+    Read_All_Sensors(ps);
     delay_loop(LOOP_DELAY);
 }
-////////////////////////////////////////////////////////////////////////////////
-// this portion of the code is now for the adc sharp sensor
-void PORT_INIT(void);
-void CLOCK_INIT(void);
-void ADC_INIT(void);
-void ADC_ENABLE(void);
-void ADC_ConversionStart(void);
-uint16_t ADC_ConverstionGetRes(void); 
-bool ADC_ConversionStatusGet(void);
-void delay_ms(int delay);
-
-// initialize the variable values
-uint16_t adc_value = 0x0000; // this holds the raw 12 bit adc result from the analog input
-uint16_t mask = 0x0000; // used in bitwise operations to isolate bits from the adc_value
-uint16_t move = 0x0000; // stores the result of the masked bit after shifting it to bit 0
-// these likely simulate the serial output over something where each bit of the adc_value will
-// be outputted depending on what the adc_value bit is
-
-// set up the groups that will be used in MAIN
-
-// initialize the pins to be used 
-void PORT_INIT(void){
-    // PA02 = ANALOG INPUT FOR THE SENSOR
-    PORT_SEC_REGS->GROUP[0].PORT_PINCFG[2] = 0x1U;
-    PORT_SEC_REGS->GROUP[0].PORT_PMUX[1] |= 0x1U;
-    
-    // PA04 AS THE EXTERNAL REF VOLTAGE REF_VREFB
-    PORT_SEC_REGS->GROUP[0].PORT_PINCFG[4] = 0x1U ;
-    PORT_SEC_REGS->GROUP[0].PORT_PMUX[2] = 0x1U ;
-    
-    // PA15 AS THE OUTPUT PIN GPIO_PA15
-    PORT_SEC_REGS->GROUP[0].PORT_DIRSET = (1<<15) ;
-    PORT_SEC_REGS->GROUP[0].PORT_PINCFG[15] = 0x0U;
-    PORT_SEC_REGS->GROUP[0].PORT_PMUX[7] = 0x0U;
-}
-
-// INITIALIZE CLOCKS 
-void CLOCK_INIT(void){
-    // GCK0 : Div factor 1 | Source Select 7 | Generic Clock Generator Enable
-    GCLK_REGS->GCLK_GENCTRL[0] = (1<<16) | (7 <<0) | (1 <<8) ;
-    while ((GCLK_REGS->GCLK_SYNCBUSY & (1<<2)) == 0) ;
-    // ADC Bus Clock : Generic Clock Generator Value | Channel Enable
-    GCLK_REGS->GCLK_PCHCTRL[28] = (0<<0) | (1<<6) ;
-    while ((GCLK_REGS->GCLK_PCHCTRL[28] & (1<<6) ) != (1 <<6) ) ;
-}
-
-void ADC_INIT(void){
-    /* Reset ADC */
-    ADC_REGS->ADC_CTRLA = (1<<0) ;
-    while ((ADC_REGS->ADC_SYNCBUSY & (1<<0) ) == (1<<0)) ;
-    /* Prescaler */
-    ADC_REGS->ADC_CTRLB = (2<<0) ;
-    /* Sampling length */
-    ADC_REGS->ADC_SAMPCTRL = (3<<0) ;
-    /* Reference */
-    ADC_REGS->ADC_REFCTRL = (4<<0) ;
-    /* Input pin */
-    ADC_REGS->ADC_INPUTCTRL = (0<<0) ;
-    /* Resolution & Operation Mode */
-    ADC_REGS->ADC_CTRLC = (uint16_t) ((0<<4) | (0 <<10) ) ; //resolution was changed
-    /* Clear all interrupt flags */
-    ADC_REGS->ADC_INTFLAG = (uint8_t) 0x07 ;
-    while (0U != ADC_REGS->ADC_SYNCBUSY) ;
-}
-
-/* Enable ADC module */
-void ADC_ENABLE ( void ){
-    ADC_REGS -> ADC_CTRLA |= (1 <<1) ;
-    while (0U != ADC_REGS -> ADC_SYNCBUSY ) ;
-}
-
-/* Start the ADC conversion by SW */
-void ADC_ConversionStart ( void ){
-    ADC_REGS->ADC_SWTRIG |= (1 <<1) ;
-    while ((ADC_REGS -> ADC_SYNCBUSY & (1 <<10) ) == (1 <<10)) ;
-}
-/* Read the conversion result */
-uint16_t ADC_ConverstionGetRes ( void ){
-    return ( uint16_t ) ADC_REGS -> ADC_RESULT ;
-}
-/* Check whether result is ready */
-bool ADC_ConversionStatusGet ( void ){
-    bool status ;
-    status = ((( ADC_REGS -> ADC_INTFLAG & (1 <<0)) >> 0) != 0U ) ;
-    if (status == true ){
-        ADC_REGS -> ADC_INTFLAG = (1 <<0) ;
-    }
-    return status ;
-}
-
-// NEW BLOCK ADDED FROM THE GIVEN ADC TEMPLATE TO CALCULATE THE CONVERSION
-float calculate_dust_density(uint16_t adc_value){
-    float voltage = (adc_value / 4095.0f) * 3.3f; // convert to voltage (this assumes 3.3V)
-    float delta_v = voltage - 0.9f; // subtract the clean air voltage from the total air
-    if(delta_v < 0.0f) delta_v = 0.0f; // do not allow negative values
-    return (delta_v / 5.0f); // return values and note that ever 0.5V increase means that we have +0.1 mg/m^3
-}
-
-// Function to classify air quality based on dust density
-const char* get_air_quality_status(float dust_density) {
-    if (dust_density > 0.5f) {
-        return "UNHEALTHY";
-    } else if (dust_density > 0.2f) {
-        return "MODERATE";
-    } else {
-        return "CLEAN";
-    }
-}
-
-// Function to get air quality color code for terminal display since it is color coded
-const char* get_air_quality_color(float dust_density) {
-    if (dust_density > 0.5f) {
-        return "\033[1;31m";  // Red
-    } else if (dust_density > 0.2f) {
-        return "\033[1;33m";  // Yellow
-    } else {
-        return "\033[1;32m";  // Green
-    }
-}
-
-// Blocking delay (very rough approximation)
-void delay_ms(int delay) {
-    for (; delay > 0; delay--) {
-        for (int i = 0; i < 2657; i++);
-    }
-}
-
-////////////////////////////////////////////////////////////////////////////////
-
-
-////////////////////////////////////////////////////////////////////////////////
-// this will be the print function that prints all the data already
-void print_all_readings(prog_state_t *ps, float dust_density) {
-    // Format and print the readings with ANSI escape codes
-    char tx_buf[256];
-    snprintf(tx_buf, sizeof(tx_buf),
-        "\033[2J\033[H"                  // Clear screen, move cursor top-left
-        "\033[1;34m========= ENVIRONMENTAL SENSOR READINGS =========\033[0m\r\n"
-        "\033[1;36m--- BME280 Sensor ---\033[0m\r\n"
-        "\033[1;35mTemperature:\033[0m %ld.%02ld °C\r\n"
-        "\033[1;34mPressure:   \033[0m %.2f hPa\r\n"
-        "\033[1;32mHumidity:   \033[0m %.2f %%\r\n"
-        "\033[1;31mAltitude:   \033[0m %.2f m\r\n"
-        "\033[1;36m--- Dust Sensor ---\033[0m\r\n"
-        "\033[1;33mDust Density:\033[0m %.3f mg/m³\r\n"
-        "%sAir Quality: %s\033[0m\r\n"
-        "\033[1;34m=================================================\033[0m\r\n",
-            (ps->temperature /100), (ps->temperature % 100), // in C
-            ps->pressure / 100.0, // in hPa,
-            ps->humidity / 1024.0, // in %
-            ps->altitude, // in m
-            dust_density,
-            get_air_quality_color(dust_density),
-            get_air_quality_status(dust_density)
-    );
-
-    usart_cdc_tx_blocking(tx_buf);
-}
-////////////////////////////////////////////////////////////////////////////////
 
 int main(void) {
-    // bme280 i2c
     prog_state_t ps; 
     prog_setup(&ps);
     delay_loop(LOOP_DELAY);
-    
-    // adc sharp sensor
-    PORT_INIT(); // set up the GPIOs (PA02 ADC INPUT, and PA15 as the temporary output)
-    CLOCK_INIT(); // set up the system and the ADC clocks
-    ADC_INIT(); // configure the ADC registers
-    
-    // then turn on the adc
-    ADC_ENABLE();
-    
-    float dust_density = 0.0f;
 
     while (1) {
-        prog_loop_one(&ps); // bme280 i2c
-        
-        ADC_ConversionStart(); // begin the ADC sampling for the sensor
-        while( !ADC_ConversionStatusGet() ); // while the ADC result is not ready
-        adc_value = ADC_ConverstionGetRes(); // read the converted DIGITAL result
-        
-        dust_density = calculate_dust_density(adc_value); // convert ADC to dust density (mg/m^3)
-        print_all_readings(&ps, dust_density);
-        
-        delay_loop(LOOP_DELAY);
+        prog_loop_one(&ps);
     }
 
     return 1;
