@@ -222,7 +222,7 @@ static int32_t compensate_temperature(uint32_t raw_temp) {
              ((int32_t)dig_T3) >> 14;
 
     t_fine = var1 + var2;
-    T = (t_fine * 5 + 128) >> 8; // actual temperature in °C × 100
+    T = (t_fine * 5 + 128) >> 8; // actual temperature in Â°C Ã— 100
     return T;
 }
 
@@ -304,7 +304,7 @@ bool BME280_ReadRawData(uint32_t *adc_T, uint32_t *adc_P, uint32_t *adc_H){
 float BME280_GetTemperature() {
     uint32_t adc_T;
     if (!BME280_ReadRawData(&adc_T, NULL, NULL)) return -1;
-    return compensate_temperature(adc_T) / 100.0;  // Convert to °C
+    return compensate_temperature(adc_T) / 100.0;  // Convert to Â°C
 }
 
 float BME280_GetPressure() {
@@ -426,13 +426,13 @@ void print_sensor_data(prog_state_t *ps){
     snprintf(ps->tx_buf, sizeof(ps->tx_buf),
         "\033[2J\033[H"
         "\033[1;36m=== ENVIRONMENTAL SENSOR READINGS ===\033[0m\r\n"
-        "\033[1;35mTemperature:\033[0m %.2f °C\r\n"
+        "\033[1;35mTemperature:\033[0m %.2f Â°C\r\n"
         "\033[1;34mPressure:   \033[0m %.2f hPa\r\n"
         "\033[1;32mHumidity:   \033[0m %.2f %%\r\n"
         "\033[1;31mAltitude:   \033[0m %.2f m\r\n"
         "\033[1;90mCO2:        \033[0m %u ppm \r\n"
         "\033[1;36m=====================================\033[0m\r\n"
-        "%sDust Density:\033[0m %.2f mg/m³\r\n"
+        "%sDust Density:\033[0m %.2f mg/mÂ³\r\n"
         "%sStatus: %s\033[0m\r\n"
         "\033[1;36m=====================================\033[0m\r\n",
         temperature, pressure, humidity, altitude, co2,
