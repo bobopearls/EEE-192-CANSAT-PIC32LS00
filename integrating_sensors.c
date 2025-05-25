@@ -62,6 +62,13 @@
 #define CLEAN_AIR_VOLTAGE 0.9f  // Clean air baseline voltage
 #define DUST_CONVERSION_FACTOR 5.0f  // Conversion factor for dust density
 
+// initialize the variable values
+uint16_t adc_value = 0x0000; // this holds the raw 12 bit adc result from the analog input
+uint16_t mask = 0x0000; // used in bitwise operations to isolate bits from the adc_value
+uint16_t move = 0x0000; // stores the result of the masked bit after shifting it to bit 0
+// these likely simulate the serial output over something where each bit of the adc_value will
+// be outputted depending on what the adc_value bit is
+
 #define LOOP_DELAY 6000000 // ~5 seconds
 
 uint16_t co2;
@@ -332,9 +339,9 @@ static void SCD41_Read(prog_state_t *ps) {
                 return;
             }
 
-            co2      = (data[0] << 8) | data[1];
+            co2 = (data[0] << 8) | data[1];
 
-            print_sensor_data(ps);
+            //print_sensor_data(ps);
             return;
             
         } else {
@@ -347,7 +354,7 @@ static void SCD41_Read(prog_state_t *ps) {
 }
 
 // --- Reset I2C if needed ---
-static void reset_i2c_if_needed(void) {
+static void reset_incase(void) {
     // Check if I2C is in error state (implementation depends on your specific MCU)
     if (SERCOM2_REGS->I2CM.SERCOM_STATUS & SERCOM_I2CM_STATUS_BUSERR_Msk) {
         // Reset the I2C module
@@ -356,13 +363,108 @@ static void reset_i2c_if_needed(void) {
         
         // Re-initialize
         SERCOM2_I2C_Initialize();
-        usart_cdc_tx_blocking("I2C bus reset performed\r\n");
         
         // Re-initialize BME280 after I2C reset
         bme280_init();
         SCD41_init();
+
+        usart_cdc_tx_blocking("I2C bus reset performed\r\n");
     }
 }
+
+void PORT_INIT(void){
+    // PA02 = ANALOG INPUT FOR THE SENSOR
+    PORT_SEC_REGS->GROUP[0].PORT_PINCFG[2] = 0x1U;
+    PORT_SEC_REGS->GROUP[0].PORT_PMUX[1] |= 0x1U;
+    
+    // PA04 AS THE EXTERNAL REF VOLTAGE REF_VREFB
+    PORT_SEC_REGS->GROUP[0].PORT_PINCFG[4] = 0x1U ;
+    PORT_SEC_REGS->GROUP[0].PORT_PMUX[2] = 0x1U ;
+    
+    // PA15 AS THE OUTPUT PIN GPIO_PA15
+    PORT_SEC_REGS->GROUP[0].PORT_DIRSET = (1<<15) ;
+    PORT_SEC_REGS->GROUP[0].PORT_PINCFG[15] = 0x0U;
+    PORT_SEC_REGS->GROUP[0].PORT_PMUX[7] = 0x0U;
+}
+
+// INITIALIZE CLOCKS 
+void CLOCK_INIT(void){
+    // GCK0 : Div factor 1 | Source Select 7 | Generic Clock Generator Enable
+    GCLK_REGS->GCLK_GENCTRL[0] = (1<<16) | (7 <<0) | (1 <<8) ;
+    while ((GCLK_REGS->GCLK_SYNCBUSY & (1<<2)) == 0) ;
+    // ADC Bus Clock : Generic Clock Generator Value | Channel Enable
+    GCLK_REGS->GCLK_PCHCTRL[28] = (0<<0) | (1<<6) ;
+    while ((GCLK_REGS->GCLK_PCHCTRL[28] & (1<<6) ) != (1 <<6) ) ;
+}
+
+void ADC_INIT(void){
+    /* Reset ADC */
+    ADC_REGS->ADC_CTRLA = (1<<0) ;
+    while ((ADC_REGS->ADC_SYNCBUSY & (1<<0) ) == (1<<0)) ;
+    /* Prescaler */
+    ADC_REGS->ADC_CTRLB = (2<<0) ;
+    /* Sampling length */
+    ADC_REGS->ADC_SAMPCTRL = (3<<0) ;
+    /* Reference */
+    ADC_REGS->ADC_REFCTRL = (4<<0) ;
+    /* Input pin */
+    ADC_REGS->ADC_INPUTCTRL = (0<<0) ;
+    /* Resolution & Operation Mode */
+    ADC_REGS->ADC_CTRLC = (uint16_t) ((0<<4) | (0 <<10) ) ; //resolution was changed
+    /* Clear all interrupt flags */
+    ADC_REGS->ADC_INTFLAG = (uint8_t) 0x07 ;
+    while (0U != ADC_REGS->ADC_SYNCBUSY) ;
+}
+
+/* Enable ADC module */
+void ADC_ENABLE ( void ){
+    ADC_REGS -> ADC_CTRLA |= (1 <<1) ;
+    while (0U != ADC_REGS -> ADC_SYNCBUSY ) ;
+}
+
+/* Start the ADC conversion by SW */
+void ADC_ConversionStart ( void ){
+    ADC_REGS->ADC_SWTRIG |= (1 <<1) ;
+    while ((ADC_REGS -> ADC_SYNCBUSY & (1 <<10) ) == (1 <<10)) ;
+}
+/* Read the conversion result */
+uint16_t ADC_ConversionGetRes ( void ){
+    return ( uint16_t ) ADC_REGS -> ADC_RESULT ;
+}
+/* Check whether result is ready */
+bool ADC_ConversionStatusGet ( void ){
+    bool status ;
+    status = ((( ADC_REGS -> ADC_INTFLAG & (1 <<0)) >> 0) != 0U ) ;
+    if (status == true ){
+        ADC_REGS -> ADC_INTFLAG = (1 <<0) ;
+    }
+    return status ;
+}
+
+float ADC_ReadDustDensity(void) {
+    ADC_ConversionStart();  // Start ADC measurement
+    int retries = 0;
+    while (!ADC_ConversionStatusGet()){
+        delay_loop(1000);
+        retries++;
+        if(retries >5){
+            usart_cdc_tx_blocking("ADC Conversion Failed\r\n");
+            return -1.0f; // returning error value
+        }
+    }  
+    // Wait for conversion
+    uint16_t adc_value = ADC_ConversionGetRes();  // Get ADC result
+    
+    // Convert ADC raw data to voltage
+    float voltage = (adc_value / ADC_RESOLUTION) * ADC_VREF;
+    
+    // Calculate dust density (mg/m³) based on voltage difference
+    float delta_v = voltage - CLEAN_AIR_VOLTAGE;
+    if (delta_v < 0.0f) delta_v = 0.0f;  // Avoid negative values
+    
+    return (delta_v / DUST_CONVERSION_FACTOR);  
+}
+
 void print_sensor_data(prog_state_t *ps){
     // READ FIRST THE BME280 DATA 
     float temperature = BME280_GetTemperature();
@@ -370,8 +472,7 @@ void print_sensor_data(prog_state_t *ps){
     float humidity = BME280_GetHumidity();
     float altitude = calculate_altitude(pressure);
     
-    float dust_density = 0.0f; //calculate_dust_density();
-    
+    float dust_density = ADC_ReadDustDensity();
     // Determine dust level status and color
     const char *dust_status, *dust_color;
     if (dust_density > 0.5f) {
@@ -407,12 +508,17 @@ void print_sensor_data(prog_state_t *ps){
 static void prog_setup(prog_state_t *ps) {
     memset(ps, 0, sizeof(*ps));
     platform_init(); // uart init
-    SCD41_init();
-    
-    //I2C INIT
+    //ADC INIT
+    CLOCK_INIT();
+    PORT_INIT();
+    // I2C INIT
     SERCOM2_I2C_Initialize();
     bme280_init();
-
+    SCD41_init();
+    // SECOND ADC
+    ADC_INIT();
+    ADC_ENABLE();
+    
     usart_cdc_tx_blocking(banner_msg);
 
     ps->rx_desc.buf = ps->rx_desc_buf;
@@ -423,7 +529,7 @@ static void prog_setup(prog_state_t *ps) {
 // --- Loop ---
 static void prog_loop_BME(prog_state_t *ps) {
     platform_do_loop_one();
-    reset_i2c_if_needed();  // Check and reset I2C if needed
+    reset_incase();  // Check and reset I2C if needed
     uint32_t adc_T, adc_P, adc_H;
     if (!BME280_ReadRawData(&adc_T, &adc_P, &adc_H)) {
         usart_cdc_tx_blocking("BME280 sensor read failed\r\n");
@@ -440,6 +546,14 @@ static void prog_loop_SCD(prog_state_t *ps){
     delay_loop(LOOP_DELAY);
 }
 
+static void prog_loop_ADC(prog_state_t *ps){
+    platform_do_loop_one();
+
+    print_sensor_data(&ps);
+    delay_loop(LOOP_DELAY);
+    
+}
+
 int main(void) {
     prog_state_t ps; 
     prog_setup(&ps);
@@ -450,7 +564,11 @@ int main(void) {
     while (1) {
         prog_loop_BME(&ps);
         delay_loop(LOOP_DELAY);
+        
         prog_loop_SCD(&ps);
+        delay_loop(LOOP_DELAY);
+        
+        prog_loop_ADC(&ps);
         delay_loop(LOOP_DELAY);
     }
 
