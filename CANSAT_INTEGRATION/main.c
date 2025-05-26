@@ -71,7 +71,6 @@ uint16_t move = 0x0000; // stores the result of the masked bit after shifting it
 #define LOOP_DELAY 6000000 // ~5 seconds
 
 uint16_t co2;
-float temperature, humidity;
 
 static const char banner_msg[] =
 "\033[0m\033[2J\033[1;1H"
@@ -251,8 +250,7 @@ static uint32_t compensate_pressure(uint32_t raw_value) {
 }
 
 float calculate_altitude(float pressure){
-    float altitude = 44330.0 * (1.0 - pow((pressure) / 1013.25, 0.1903));
-    return altitude / 10; // placeholder because sensor fell down
+    return 44330.0 * (1.0 - pow((pressure) / 1013.25, 0.1903)); // computed using pressure
 }
 
 static uint32_t compensate_humidity(uint32_t raw_value) {
@@ -275,9 +273,6 @@ static uint32_t compensate_humidity(uint32_t raw_value) {
 
 // --- BME Init ---
 void BME280_init(void) {
-    BME280_WriteReg(BME280_REG_RESET, 0xB6);  // Soft reset
-    delay_loop(LOOP_DELAY);
-    
     uint8_t id;
     if (BME280_ReadReg(BME280_REG_ID, &id, 1) && id == BME280_CHIP_ID) {
         // Configure with recommended settings
@@ -327,7 +322,7 @@ float BME280_GetHumidity() {
 // --- SCD41 Read ---
 static void SCD41_Read(prog_state_t *ps) {
     uint8_t data[9];
-    uint16_t raw_temp, raw_hum;
+    //uint16_t co2;
 
     SCD41_cmd(SCD41_HIGH_READ, SCD41_LOW_READ);  // Read Measurement
     delay_loop(SCD41_DELAY_READ);
@@ -344,11 +339,6 @@ static void SCD41_Read(prog_state_t *ps) {
             }
 
             co2 = (data[0] << 8) | data[1];
-            raw_temp = (data[3] << 8) | data[4];
-            raw_hum = (data[6] << 8) | data[7];
-
-            temperature = -45.0 + (175.0 * raw_temp / 65535.0);  // Convert to °C
-            humidity = 100.0 * raw_hum / 65535.0;  // Convert to %RH
 
             print_sensor_data(ps);
             return;
@@ -365,7 +355,7 @@ static void SCD41_Read(prog_state_t *ps) {
 float calculate_dust_density(uint16_t adc_value){
     float voltage = (adc_value / ADC_RESOLUTION) * ADC_VREF; // convert to voltage (this assumes 3.3V)
     float delta_v = voltage - CLEAN_AIR_VOLTAGE; // subtract the clean air voltage from the total air
-    if(delta_v < 0.0f) delta_v = 0.0f; // do not allow negative values 
+    if(delta_v < 0.0f) delta_v = 0.0f; // do not allow negative values change later
     return (delta_v / DUST_CONVERSION_FACTOR); // return values and note that ever 0.5V increase means that we have +0.1 mg/m^3
 }
 
@@ -408,9 +398,9 @@ bool ADC_ConversionStatusGet ( void ){
 
 void print_sensor_data(prog_state_t *ps){
     // READ FIRST THE BME280 DATA 
-    //float temperature = BME280_GetTemperature(); //BME SENSOR STOPPED WORKING. IT DROPPED. ALREADY BOUGHT A NEW ONE.
+    float temperature = BME280_GetTemperature();
     float pressure = BME280_GetPressure();
-    //float humidity = BME280_GetHumidity();
+    float humidity = BME280_GetHumidity();
     float altitude = calculate_altitude(pressure);
     
     // Start ADC conversion
@@ -437,9 +427,9 @@ void print_sensor_data(prog_state_t *ps){
         "\033[2J\033[H"
         "\033[1;36m=== ENVIRONMENTAL SENSOR READINGS ===\033[0m\r\n"
         "\033[1;35mTemperature:\033[0m %.2f °C\r\n"
-        "\033[1;34mPressure (BME FELL DOWN):   \033[0m %.2f hPa\r\n"
+        "\033[1;34mPressure:   \033[0m %.2f hPa\r\n"
         "\033[1;32mHumidity:   \033[0m %.2f %%\r\n"
-        "\033[1;31mAltitude (BME FELL DOWN):   \033[0m %.2f m\r\n"
+        "\033[1;31mAltitude:   \033[0m %.2f m\r\n"
         "\033[1;90mCO2:        \033[0m %u ppm \r\n"
         "\033[1;36m=====================================\033[0m\r\n"
         "%sDust Density:\033[0m %.2f mg/m³\r\n"
@@ -503,10 +493,9 @@ int main(void) {
     
 
     while (1) {
-        
-        prog_loop_SCD(&ps);  // Read SCD 41 sensor
-        delay_loop(LOOP_DELAY);
         prog_loop_BME(&ps);  // Read BME280 sensor
+        delay_loop(LOOP_DELAY);
+        prog_loop_SCD(&ps);  // Read SCD 41 sensor
         delay_loop(LOOP_DELAY);
         prog_loop_ADC(&ps);  // Read ADC dust sensor
         delay_loop(LOOP_DELAY);
