@@ -276,7 +276,7 @@ static uint32_t compensate_humidity(uint32_t raw_value) {
 // --- BME Init ---
 void BME280_init(void) {
     BME280_WriteReg(BME280_REG_RESET, 0xB6);  // Soft reset
-    delay_loop(100000);
+    delay_loop(LOOP_DELAY);
     
     uint8_t id;
     if (BME280_ReadReg(BME280_REG_ID, &id, 1) && id == BME280_CHIP_ID) {
