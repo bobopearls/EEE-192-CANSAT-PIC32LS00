@@ -503,9 +503,9 @@ int main(void) {
     
 
     while (1) {
-        prog_loop_BME(&ps);  // Read BME280 sensor
-        delay_loop(LOOP_DELAY);
         prog_loop_SCD(&ps);  // Read SCD 41 sensor
+        delay_loop(LOOP_DELAY);
+        prog_loop_BME(&ps);  // Read BME280 sensor
         delay_loop(LOOP_DELAY);
         prog_loop_ADC(&ps);  // Read ADC dust sensor
         delay_loop(LOOP_DELAY);
