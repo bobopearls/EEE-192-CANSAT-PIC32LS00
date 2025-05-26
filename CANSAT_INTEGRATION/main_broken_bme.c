@@ -251,8 +251,8 @@ static uint32_t compensate_pressure(uint32_t raw_value) {
 }
 
 float calculate_altitude(float pressure){
-    float altitude = 44330.0 * (1.0 - pow((pressure / 1013.25), 0.1903));
-    return altitude;
+    float altitude = 44330.0 * (1.0 - pow((pressure) / 1013.25, 0.1903));
+    return altitude / 10; // placeholder because sensor fell down
 }
 
 static uint32_t compensate_humidity(uint32_t raw_value) {
@@ -503,6 +503,7 @@ int main(void) {
     
 
     while (1) {
+        
         prog_loop_SCD(&ps);  // Read SCD 41 sensor
         delay_loop(LOOP_DELAY);
         prog_loop_BME(&ps);  // Read BME280 sensor
