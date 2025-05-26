@@ -250,7 +250,8 @@ static uint32_t compensate_pressure(uint32_t raw_value) {
 }
 
 float calculate_altitude(float pressure){
-    return 44330.0 * (1.0 - pow((pressure) / 1013.25, 0.1903)); // computed using pressure
+    float altitude = 44330.0 * (1.0 - pow((pressure) / 1013.25, 0.1903));
+    return altitude / 100;
 }
 
 static uint32_t compensate_humidity(uint32_t raw_value) {
